@@ -22,9 +22,20 @@ This stanza describes how to build the Docker image your model runs in. It conta
 
 <!-- Alphabetical order, please! -->
 
+### `accelerator`
+
+The accelerator the image is built for: `cpu`, `nvidia` (CUDA) or `amd` (ROCm). For example:
+
+```yaml
+build:
+  accelerator: amd
+```
+
+When `accelerator` isn't set, [`gpu`](#gpu) decides: `gpu: true` means `nvidia`, otherwise `cpu`. If you set both, they must agree. You can override this with `cog build --accelerator`. See [GPU accelerators](accelerators.md) for details, including how AMD images are built and run.
+
 ### `cuda`
 
-Cog automatically picks the correct version of CUDA to install, but this lets you override it for whatever reason by specifying the minor (`11.8`) or patch (`11.8.0`) version of CUDA to use.
+Cog automatically picks the correct version of CUDA to install, but this lets you override it for whatever reason by specifying the minor (`11.8`) or patch (`11.8.0`) version of CUDA to use. It only applies to NVIDIA images, and it's an error to set it with `accelerator: amd`.
 
 For example:
 
@@ -35,7 +46,9 @@ build:
 
 ### `gpu`
 
-Enable GPUs for this model. When enabled, the [nvidia-docker](https://github.com/NVIDIA/nvidia-docker) base image will be used, and Cog will automatically figure out what versions of CUDA and cuDNN to use based on the version of Python, PyTorch, and Tensorflow that you are using.
+Enable NVIDIA GPUs for this model. When enabled, the [nvidia-docker](https://github.com/NVIDIA/nvidia-docker) base image will be used, and Cog will automatically figure out what versions of CUDA and cuDNN to use based on the version of Python, PyTorch, and Tensorflow that you are using.
+
+`gpu: true` is equivalent to `accelerator: nvidia`. To build for AMD GPUs, use [`accelerator: amd`](#accelerator) instead.
 
 For example:
 
@@ -136,6 +149,18 @@ build:
 Cog supports Python 3.10, 3.11, 3.12, and 3.13. If you don't define a version, Cog will use the latest version of Python 3.13 or a version of Python that is compatible with the versions of PyTorch or TensorFlow you specify.
 
 Note that these are the versions supported **in the Docker container**, not your host machine. You can run any version(s) of Python you wish on your host machine.
+
+### `rocm`
+
+The ROCm version for `accelerator: amd`, for example:
+
+```yaml
+build:
+  accelerator: amd
+  rocm: "6.2"
+```
+
+When it isn't set, Cog picks the newest ROCm version that has a build of your pinned `torch` and `torchvision`. It's an error to set it for any other accelerator. See [ROCm versions](accelerators.md#rocm-versions) for the supported versions.
 
 ### `run`
 

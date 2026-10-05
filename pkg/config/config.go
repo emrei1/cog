@@ -55,6 +55,12 @@ type Build struct {
 	PreInstall         []string  `json:"pre_install,omitempty" yaml:"pre_install,omitempty"` // Deprecated, but included for backwards compatibility
 	CUDA               string    `json:"cuda,omitempty" yaml:"cuda,omitempty"`
 	CuDNN              string    `json:"cudnn,omitempty" yaml:"cudnn,omitempty"`
+	// Accelerator is the accelerator the image targets ("amd"). It is empty
+	// for CPU and NVIDIA images, which are described by GPU alone so that
+	// their config matches what Cog has always written; use AcceleratorKind.
+	Accelerator string `json:"accelerator,omitempty" yaml:"accelerator,omitempty"`
+	// ROCm is the ROCm version for AMD images.
+	ROCm string `json:"rocm,omitempty" yaml:"rocm,omitempty"`
 	// SDKVersion pins the cog Python SDK version installed in the container.
 	// Accepts a PEP 440 version string (e.g. "0.18.0" or "0.18.0a1").
 	// When empty the latest release is installed. Overridden by COG_SDK_WHEEL env var.
@@ -341,11 +347,9 @@ func (c *Config) Complete(projectDir string) error {
 		c.Build.pythonRequirementsContent = c.Build.PythonPackages
 	}
 
-	// Resolve CUDA/CuDNN versions if GPU is enabled
-	if c.Build.GPU {
-		if err := c.validateAndCompleteCUDA(); err != nil {
-			return err
-		}
+	// Resolve the accelerator toolkit (e.g. CUDA/CuDNN for NVIDIA, ROCm for AMD)
+	if err := c.completeAccelerator(); err != nil {
+		return err
 	}
 
 	// Parse and validate environment variables
@@ -516,56 +520,32 @@ func isLocalPackageArtifactRequirement(requirement string) bool {
 	return err != nil || ok
 }
 
-// pythonPackageForArch takes a package==version line and
-// returns a package==version and index URL resolved to the correct GPU package for the given OS and architecture
+// pythonPackageForArch takes a package==version line and returns a package==version and
+// index URL resolved to the correct package for the accelerator, OS and architecture
 func (c *Config) pythonPackageForArch(pkg, goos, goarch string) (actualPackage string, findLinksList []string, extraIndexURLs []string, err error) {
 	if isLocalPackageArtifactRequirement(pkg) {
 		return pkg, []string{}, []string{}, nil
 	}
+	tc, err := c.toolchain()
+	if err != nil {
+		return "", nil, nil, err
+	}
 	name, version, findLinksList, extraIndexURLs, err := requirements.SplitPinnedPythonRequirement(pkg)
 	if err != nil {
 		// It's not pinned, so just return the line verbatim
-		return pkg, []string{}, []string{}, nil
+		indexes := tc.unpinnedPackageIndexes(c, pkg)
+		if indexes == nil {
+			indexes = []string{}
+		}
+		return pkg, []string{}, indexes, nil
 	}
 	if len(extraIndexURLs) > 0 {
 		return name + "==" + version, findLinksList, extraIndexURLs, nil
 	}
 
-	extraIndexURL := ""
-	findLinks := ""
-	switch name {
-	case "tensorflow":
-		if c.Build.GPU {
-			name, version, err = tfGPUPackage(version, c.Build.CUDA)
-			if err != nil {
-				return "", nil, nil, err
-			}
-		}
-		// There is no CPU case for tensorflow because the default package is just the CPU package, so no transformation of version is needed
-	case "torch":
-		if c.Build.GPU {
-			name, version, findLinks, extraIndexURL, err = torchGPUPackage(version, c.Build.CUDA)
-			if err != nil {
-				return "", nil, nil, err
-			}
-		} else {
-			name, version, findLinks, extraIndexURL, err = torchCPUPackage(version, goos, goarch)
-			if err != nil {
-				return "", nil, nil, err
-			}
-		}
-	case "torchvision":
-		if c.Build.GPU {
-			name, version, findLinks, extraIndexURL, err = torchvisionGPUPackage(version, c.Build.CUDA)
-			if err != nil {
-				return "", nil, nil, err
-			}
-		} else {
-			name, version, findLinks, extraIndexURL, err = torchvisionCPUPackage(version, goos, goarch)
-			if err != nil {
-				return "", nil, nil, err
-			}
-		}
+	name, version, findLinks, extraIndexURL, err := tc.pinnedPackage(c, name, version, goos, goarch)
+	if err != nil {
+		return "", nil, nil, err
 	}
 	pkgWithVersion := name
 	if version != "" {

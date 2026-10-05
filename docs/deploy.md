@@ -112,9 +112,15 @@ This is the approach you'd use for production deployment.
 # If your model uses a CPU:
 docker run -d -p 5001:5000 my-model
 
-# If your model uses a GPU:
+# If your model uses an NVIDIA GPU:
 docker run -d -p 5001:5000 --gpus all my-model
+
+# If your model uses an AMD GPU (accelerator: amd):
+docker run -d -p 5001:5000 --device=/dev/kfd --device=/dev/dri \
+  --group-add video --group-add "$(getent group render | cut -d: -f3)" my-model
 ```
+
+See [GPU accelerators](accelerators.md) for the host requirements for AMD GPUs.
 
 The server listens on port 5000 inside the container (mapped to 5001 above).
 

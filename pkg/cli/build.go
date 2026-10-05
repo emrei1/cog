@@ -64,6 +64,7 @@ with 'cog push'.`,
 	addSeparateWeightsFlag(cmd)
 	addSchemaFlag(cmd)
 	addUseCudaBaseImageFlag(cmd)
+	addAcceleratorFlags(cmd)
 	addDockerfileFlag(cmd)
 	addUseCogBaseImageFlag(cmd)
 	addBuildTimestampFlag(cmd)
@@ -83,7 +84,7 @@ func buildCommand(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	src, err := model.NewSource(configFilename)
+	src, err := loadSource(cmd)
 	if err != nil {
 		return err
 	}
@@ -147,7 +148,7 @@ func addSchemaFlag(cmd *cobra.Command) {
 }
 
 func addUseCudaBaseImageFlag(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&buildUseCudaBaseImage, "use-cuda-base-image", "auto", "Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects")
+	cmd.Flags().StringVar(&buildUseCudaBaseImage, "use-cuda-base-image", "auto", "Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects")
 }
 
 func addDockerfileFlag(cmd *cobra.Command) {

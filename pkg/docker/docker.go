@@ -11,7 +11,6 @@ import (
 	"os"
 	"regexp"
 	"strconv"
-	"strings"
 
 	"github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
@@ -31,6 +30,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/replicate/cog/pkg/accelerator"
 	"github.com/replicate/cog/pkg/docker/command"
 	"github.com/replicate/cog/pkg/global"
 	"github.com/replicate/cog/pkg/util/console"
@@ -499,11 +499,9 @@ func (c *apiClient) containerRun(ctx context.Context, options command.RunOptions
 	}
 
 	if options.GPUs != "" {
-		deviceRequest, err := parseGPURequest(options)
-		if err != nil {
+		if err := applyAcceleratorRunConfig(options, containerCfg, hostCfg); err != nil {
 			return "", err
 		}
-		hostCfg.DeviceRequests = []container.DeviceRequest{deviceRequest}
 	}
 
 	// Configure port bindings
@@ -702,36 +700,35 @@ func portBindingsFromRunOptions(ports []command.Port) nat.PortMap {
 	return bindings
 }
 
-// parseGPURequest converts a Docker CLI --gpus string into a DeviceRequest slice
-func parseGPURequest(opts command.RunOptions) (container.DeviceRequest, error) {
-	if opts.GPUs == "" {
-		return container.DeviceRequest{}, nil
+// applyAcceleratorRunConfig exposes the GPUs selected by options.GPUs to the
+// container, using the device configuration of the image's accelerator.
+func applyAcceleratorRunConfig(options command.RunOptions, containerCfg *container.Config, hostCfg *container.HostConfig) error {
+	backend, err := accelerator.ForRuntime(options.Accelerator)
+	if err != nil {
+		return err
 	}
-
-	deviceRequest := container.DeviceRequest{
-		Driver:       "nvidia",
-		Capabilities: [][]string{{"gpu"}},
+	runCfg, err := backend.RunConfig(options.GPUs)
+	if err != nil {
+		return err
 	}
-
-	// Parse the GPUs string
-	switch opts.GPUs {
-	case "all":
-		deviceRequest.Count = -1 // Use all available GPUs
-	default:
-		// Check if it's a number
-		if count, err := strconv.Atoi(opts.GPUs); err == nil {
-			deviceRequest.Count = count
-		} else if after, ok := strings.CutPrefix(opts.GPUs, "device="); ok {
-			// Handle device=0,1 format
-			devices := after
-			deviceRequest.DeviceIDs = strings.Split(devices, ",")
-		} else {
-			// Invalid GPU specification, return nil to indicate no GPU access
-			return container.DeviceRequest{}, fmt.Errorf("invalid GPU specification: %q", opts.GPUs)
-		}
+	for _, req := range runCfg.DeviceRequests {
+		hostCfg.DeviceRequests = append(hostCfg.DeviceRequests, container.DeviceRequest{
+			Driver:       req.Driver,
+			Count:        req.Count,
+			DeviceIDs:    req.DeviceIDs,
+			Capabilities: req.Capabilities,
+		})
 	}
-
-	return deviceRequest, nil
+	for _, device := range runCfg.Devices {
+		hostCfg.Devices = append(hostCfg.Devices, container.DeviceMapping{
+			PathOnHost:        device,
+			PathInContainer:   device,
+			CgroupPermissions: "rwm",
+		})
+	}
+	hostCfg.GroupAdd = append(hostCfg.GroupAdd, runCfg.GroupAdd...)
+	containerCfg.Env = append(containerCfg.Env, runCfg.Env...)
+	return nil
 }
 
 // shouldAttachStdin determines if we should attach stdin to the container

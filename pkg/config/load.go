@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/replicate/cog/pkg/accelerator"
 	"github.com/replicate/cog/pkg/errors"
 	"github.com/replicate/cog/pkg/util/files"
 )
@@ -19,11 +20,39 @@ type LoadResult struct {
 	RootDir  string
 }
 
+// LoadOption configures Load.
+type LoadOption func(*loadOptions)
+
+type loadOptions struct {
+	accelerator AcceleratorSelection
+	hostProbe   accelerator.HostProbe
+}
+
+// WithAcceleratorSelection overrides the accelerator declared in cog.yaml,
+// e.g. from `cog build --accelerator amd`.
+func WithAcceleratorSelection(sel AcceleratorSelection) LoadOption {
+	return func(o *loadOptions) {
+		o.accelerator = sel
+	}
+}
+
+// withHostProbe replaces the hardware probe used by --accelerator auto.
+func withHostProbe(probe accelerator.HostProbe) LoadOption {
+	return func(o *loadOptions) {
+		o.hostProbe = probe
+	}
+}
+
 // Load parses, validates, and completes a config from an io.Reader.
 // The projectDir is used for validation (checking that referenced files exist)
 // and for completion (resolving CUDA versions, loading requirements files, etc.).
 // Always returns warnings if present, even on success.
-func Load(r io.Reader, projectDir string) (*LoadResult, error) {
+func Load(r io.Reader, projectDir string, opts ...LoadOption) (*LoadResult, error) {
+	options := loadOptions{hostProbe: accelerator.LocalHost()}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	// Parse
 	cfgFile, err := parse(r)
 	if err != nil {
@@ -44,6 +73,11 @@ func Load(r io.Reader, projectDir string) (*LoadResult, error) {
 	// Convert to Config struct
 	config, err := configFileToConfig(cfgFile)
 	if err != nil {
+		return nil, err
+	}
+
+	// Apply command-line accelerator overrides before resolving toolkit versions
+	if err := applyAcceleratorSelection(config, acceleratorDeclared(cfgFile), options.accelerator, options.hostProbe); err != nil {
 		return nil, err
 	}
 

@@ -52,6 +52,7 @@ exploring the environment your model will run in.`,
 	addBuildProgressOutputFlag(cmd)
 	addDockerfileFlag(cmd)
 	addUseCudaBaseImageFlag(cmd)
+	addAcceleratorFlags(cmd)
 	addUseCogBaseImageFlag(cmd)
 	addGpusFlag(cmd)
 	addConfigFlag(cmd)
@@ -144,7 +145,7 @@ func execCmd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	src, err := model.NewSource(configFilename)
+	src, err := loadSource(cmd)
 	if err != nil {
 		return err
 	}
@@ -179,12 +180,13 @@ func execCmd(cmd *cobra.Command, args []string) error {
 	}
 
 	runOptions := command.RunOptions{
-		Args:    args,
-		Env:     env,
-		GPUs:    gpus,
-		Image:   m.ImageRef(),
-		Volumes: []command.Volume{{Source: src.ProjectDir, Destination: "/src"}},
-		Workdir: "/src",
+		Args:        args,
+		Env:         env,
+		GPUs:        gpus,
+		Accelerator: m.Accelerator(),
+		Image:       m.ImageRef(),
+		Volumes:     []command.Volume{{Source: src.ProjectDir, Destination: "/src"}},
+		Workdir:     "/src",
 	}
 
 	ports, err := parsePublishFlags(execPorts)

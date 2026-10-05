@@ -90,6 +90,7 @@ it.`,
 	}
 
 	addUseCudaBaseImageFlag(cmd)
+	addAcceleratorFlags(cmd)
 	addUseCogBaseImageFlag(cmd)
 	addBuildProgressOutputFlag(cmd)
 	addDockerfileFlag(cmd)
@@ -220,7 +221,7 @@ func cmdPredict(cmd *cobra.Command, args []string) error {
 
 	if len(args) == 0 {
 		// Build image
-		src, err := model.NewSource(configFilename)
+		src, err := loadSource(cmd)
 		if err != nil {
 			return err
 		}
@@ -321,10 +322,11 @@ func cmdPredict(cmd *cobra.Command, args []string) error {
 
 	predictor, err := predict.NewPredictor(ctx, predict.PredictorOptions{
 		RunOptions: command.RunOptions{
-			GPUs:    gpus,
-			Image:   imageName,
-			Volumes: volumes,
-			Env:     env,
+			GPUs:        gpus,
+			Accelerator: m.Accelerator(),
+			Image:       imageName,
+			Volumes:     volumes,
+			Env:         env,
 		},
 		IsTrain:       false,
 		Docker:        dockerClient,

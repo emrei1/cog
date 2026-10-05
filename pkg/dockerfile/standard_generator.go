@@ -118,6 +118,9 @@ func NewStandardGenerator(config *config.Config, dir string, buildCacheDir strin
 	}, nil
 }
 
+// SetUseCudaBaseImage controls whether GPU images start from the accelerator
+// vendor's base image (nvidia/cuda, rocm/dev-ubuntu) rather than the Python
+// image. The name predates non-NVIDIA accelerators.
 func (g *StandardGenerator) SetUseCudaBaseImage(argumentValue string) {
 	// "false" -> false, "true" -> true, "auto" -> true, "asdf" -> true
 	g.useCudaBaseImage = argumentValue != "false"
@@ -137,7 +140,14 @@ func (g *StandardGenerator) IsUsingCogBaseImage() bool {
 	if useCogBaseImage != nil {
 		return *useCogBaseImage
 	}
-	return true
+	backend, err := g.Config.AcceleratorBackend()
+	return err == nil && backend.SupportsCogBaseImage()
+}
+
+// usesAcceleratorBaseImage reports whether the image starts from the
+// accelerator vendor's base image, which doesn't ship the requested Python.
+func (g *StandardGenerator) usesAcceleratorBaseImage() bool {
+	return g.Config.Accelerator().IsGPU() && g.useCudaBaseImage && !g.IsUsingCogBaseImage()
 }
 
 func (g *StandardGenerator) SetStrip(strip bool) {
@@ -154,12 +164,13 @@ func (g *StandardGenerator) SetBreakSystemPackages(breakSystemPackages bool) {
 
 // needsBreakSystemPackages reports whether pip invocations need
 // --break-system-packages. True when the caller opts in explicitly, the
-// generated Dockerfile installs Python via uv, or a CUDA 13+ Cog base supplies
+// generated Dockerfile installs Python via uv on an accelerator base image, or a
+// CUDA 13+ Cog base supplies
 // uv-managed Python. uv marks its installed Pythons as externally managed
 // (PEP 668).
 func (g *StandardGenerator) needsBreakSystemPackages() bool {
 	return g.breakSystemPackages ||
-		(g.Config.Build.GPU && g.useCudaBaseImage && !g.IsUsingCogBaseImage()) ||
+		g.usesAcceleratorBaseImage() ||
 		(g.IsUsingCogBaseImage() && version.GreaterOrEqual(g.Config.Build.CUDA, "13.0"))
 }
 
@@ -177,6 +188,10 @@ func (g *StandardGenerator) GenerateInitialSteps(ctx context.Context) (string, e
 	defer g.closeBuildRoot()
 
 	baseImage, err := g.BaseImage(ctx)
+	if err != nil {
+		return "", err
+	}
+	preamble, err := g.preamble()
 	if err != nil {
 		return "", err
 	}
@@ -235,7 +250,7 @@ func (g *StandardGenerator) GenerateInitialSteps(ctx context.Context) (string, e
 		return joinStringsWithoutLineSpace(steps), nil
 	}
 
-	// For the CUDA path, uv is installed inside installPython (after the apt step).
+	// For the accelerator base image path, uv is installed inside installPython (after the apt step).
 	// For all other paths (python:X-slim), install uv after apt.
 	uvInstall := ""
 	if installPython == "" {
@@ -244,7 +259,7 @@ func (g *StandardGenerator) GenerateInitialSteps(ctx context.Context) (string, e
 	steps := []string{
 		"#syntax=docker/dockerfile:1.4",
 		"FROM " + baseImage,
-		g.preamble(),
+		preamble,
 		installCACert, // Early! Before tini (uses curl), apt, pip, etc.
 		g.installTini(),
 		envs,
@@ -444,6 +459,13 @@ FROM scratch
 }
 
 func (g *StandardGenerator) BaseImage(ctx context.Context) (string, error) {
+	backend, err := g.Config.AcceleratorBackend()
+	if err != nil {
+		return "", err
+	}
+	if g.IsUsingCogBaseImage() && !backend.SupportsCogBaseImage() {
+		return "", fmt.Errorf("cog base images are not available for %s; remove --use-cog-base-image", backend.DisplayName())
+	}
 	if g.IsUsingCogBaseImage() {
 		baseImage, err := g.determineBaseImageName(ctx)
 		if err == nil || g.useCogBaseImage != nil {
@@ -456,8 +478,11 @@ func (g *StandardGenerator) BaseImage(ctx context.Context) (string, error) {
 		}
 	}
 
-	if g.Config.Build.GPU && g.useCudaBaseImage {
-		return g.Config.CUDABaseImageTag()
+	if g.Config.Accelerator().IsGPU() && g.useCudaBaseImage {
+		baseImage, err := g.Config.AcceleratorBaseImage()
+		if err != nil || baseImage != "" {
+			return baseImage, err
+		}
 	}
 	return "python:" + g.Config.Build.PythonVersion + "-slim", nil
 }
@@ -490,11 +515,16 @@ func (g *StandardGenerator) BuildContexts() (map[string]string, error) {
 	}, nil
 }
 
-func (g *StandardGenerator) preamble() string {
-	return `ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/local/nvidia/bin
-ENV NVIDIA_DRIVER_CAPABILITIES=all`
+func (g *StandardGenerator) preamble() (string, error) {
+	backend, err := g.Config.AcceleratorBackend()
+	if err != nil {
+		return "", err
+	}
+	lines := append([]string{
+		"ENV DEBIAN_FRONTEND=noninteractive",
+		"ENV PYTHONUNBUFFERED=1",
+	}, backend.ImageEnv()...)
+	return strings.Join(lines, "\n"), nil
 }
 
 func (g *StandardGenerator) installTini() string {
@@ -536,8 +566,8 @@ func (g *StandardGenerator) aptInstalls() (string, error) {
 }
 
 func (g *StandardGenerator) installPython() (string, error) {
-	if g.Config.Build.GPU && g.useCudaBaseImage && !g.IsUsingCogBaseImage() {
-		return g.installPythonCUDA()
+	if g.usesAcceleratorBaseImage() {
+		return g.installPythonWithUV()
 	}
 	return "", nil
 }
@@ -554,7 +584,9 @@ func (g *StandardGenerator) installUV() string {
 ENV UV_SYSTEM_PYTHON=true`
 }
 
-func (g *StandardGenerator) installPythonCUDA() (string, error) {
+// installPythonWithUV installs the requested Python on an accelerator base
+// image, which only has the distribution's Python (if any).
+func (g *StandardGenerator) installPythonWithUV() (string, error) {
 	// TODO: check that python version is valid
 
 	py := g.Config.Build.PythonVersion

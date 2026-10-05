@@ -22,7 +22,8 @@ type Source struct {
 // NewSource loads configuration from the given path and returns a Source.
 // The configPath can be a filename (e.g., "cog.yaml") which will be searched
 // for in the current directory and parent directories.
-func NewSource(configPath string) (*Source, error) {
+// Options are applied when loading the config, e.g. to override its accelerator.
+func NewSource(configPath string, opts ...config.LoadOption) (*Source, error) {
 	if configPath == "" {
 		configPath = "cog.yaml"
 	}
@@ -41,7 +42,7 @@ func NewSource(configPath string) (*Source, error) {
 	}
 	defer f.Close()
 
-	result, err := config.Load(f, rootDir)
+	result, err := config.Load(f, rootDir, opts...)
 	if err != nil {
 		// Add filename context to parse errors if not already present
 		if parseErr, ok := err.(*config.ParseError); ok && parseErr.Filename == "" {

@@ -195,6 +195,15 @@ When no matching cog-base exists (e.g., unusual version combination):
 - Dockerfile installs PyTorch and other packages via pip
 - Slower builds but supports any valid combination
 
+#### Accelerators
+
+The accelerator an image targets (`cpu`, `nvidia`, `amd`) comes from `build.accelerator`, the legacy `build.gpu` flag, or `cog build --accelerator`. Vendor-specific behavior is isolated in two places, and the rest of the build asks them instead of checking for a vendor:
+
+- **`pkg/accelerator`** defines `Kind` and a `Backend` per accelerator. A backend owns the facts that don't depend on `cog.yaml`: whether cog-base images exist for it, the `ENV` lines in the generated Dockerfile, how `cog predict`/`serve`/`train`/`exec` expose host devices to the container (NVIDIA device requests vs. `/dev/kfd` + `/dev/dri` passthrough for AMD), hardware detection for `--accelerator auto`, and the embedded ROCm release catalog (`rocm_releases.json`).
+- **`pkg/config/toolchain.go`** defines a `toolchain` per accelerator for the parts that depend on `cog.yaml`: resolving the toolkit version (CUDA from the compatibility matrix, ROCm from the catalog), choosing the vendor base image, and mapping `torch`/`torchvision`/`tensorflow` requirements to that toolkit's builds and package index.
+
+AMD images use the same generated-Dockerfile path as NVIDIA images without a cog-base image: the vendor base image (`rocm/dev-ubuntu-22.04:<rocm>`), Python installed with uv, and requirements resolved against the ROCm PyTorch index. Adding an accelerator means adding a `Kind`, a `Backend` and a `toolchain`.
+
 ---
 
 ### 5. Python Wheels (SDK + Coglet)

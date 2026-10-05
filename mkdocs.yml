@@ -13,6 +13,7 @@ nav:
   - HTTP API: http.md
   - CLI: cli.md
   - Base images: base-images.md
+  - GPU accelerators: accelerators.md
   - Environment variables: environment.md
   - Observability: observability.md
   - Private registry: private-package-registry.md

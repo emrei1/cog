@@ -12,6 +12,12 @@
       "type": "object",
       "description": "This stanza describes how to build the Docker image your model runs in.",
       "properties": {
+        "accelerator": {
+          "$id": "#/properties/build/properties/accelerator",
+          "type": "string",
+          "enum": ["cpu", "nvidia", "amd", "auto"],
+          "description": "The accelerator the image targets: `cpu`, `nvidia` (CUDA) or `amd` (ROCm). Defaults to `nvidia` when `gpu: true` and `cpu` otherwise. `auto` is only accepted on the command line."
+        },
         "cuda": {
           "$id": "#/properties/build/properties/cuda",
           "type": "string",
@@ -25,7 +31,12 @@
         "gpu": {
           "$id": "#/properties/build/properties/gpu",
           "type": "boolean",
-          "description": "Enable GPUs for this model. When enabled, the [nvidia-docker](https://github.com/NVIDIA/nvidia-docker) base image will be used, and Cog will automatically figure out what versions of CUDA and cuDNN to use based on the version of Python, PyTorch, and Tensorflow that you are using."
+          "description": "Enable GPUs for this model. On its own, `gpu: true` targets NVIDIA GPUs: the [nvidia-docker](https://github.com/NVIDIA/nvidia-docker) base image will be used, and Cog will automatically figure out what versions of CUDA and cuDNN to use based on the version of Python, PyTorch, and Tensorflow that you are using."
+        },
+        "rocm": {
+          "$id": "#/properties/build/properties/rocm",
+          "type": "string",
+          "description": "The ROCm version for `accelerator: amd`. Cog picks one that matches your PyTorch version when this is not set."
         },
         "python_version": {
           "$id": "#/properties/build/properties/python_version",

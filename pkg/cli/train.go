@@ -43,6 +43,7 @@ Otherwise, it will build the model in the current directory and train it.`,
 	addBuildProgressOutputFlag(cmd)
 	addDockerfileFlag(cmd)
 	addUseCudaBaseImageFlag(cmd)
+	addAcceleratorFlags(cmd)
 	addGpusFlag(cmd)
 	addUseCogBaseImageFlag(cmd)
 	addConfigFlag(cmd)
@@ -74,7 +75,7 @@ func cmdTrain(cmd *cobra.Command, args []string) error {
 
 	if len(args) == 0 {
 		// Build image
-		src, err := model.NewSource(configFilename)
+		src, err := loadSource(cmd)
 		if err != nil {
 			return err
 		}
@@ -164,11 +165,12 @@ func cmdTrain(cmd *cobra.Command, args []string) error {
 
 	predictor, err := predict.NewPredictor(ctx, predict.PredictorOptions{
 		RunOptions: command.RunOptions{
-			GPUs:    gpus,
-			Image:   imageName,
-			Volumes: volumes,
-			Env:     trainEnvFlags,
-			Args:    []string{"python", "-m", "cog.server.http", "--x-mode", "train"},
+			GPUs:        gpus,
+			Accelerator: m.Accelerator(),
+			Image:       imageName,
+			Volumes:     volumes,
+			Env:         trainEnvFlags,
+			Args:        []string{"python", "-m", "cog.server.http", "--x-mode", "train"},
 		},
 		IsTrain:       true,
 		Docker:        dockerClient,

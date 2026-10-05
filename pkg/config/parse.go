@@ -89,6 +89,14 @@ func configFileToConfig(cfg *configFile) (*Config, error) {
 		if cfg.Build.SDKVersion != nil {
 			config.Build.SDKVersion = *cfg.Build.SDKVersion
 		}
+		if cfg.Build.ROCm != nil {
+			config.Build.ROCm = *cfg.Build.ROCm
+		}
+		kind, err := acceleratorFromFile(cfg.Build)
+		if err != nil {
+			return nil, err
+		}
+		config.Build.setAccelerator(kind)
 
 		// Convert Run items
 		config.Build.Run = make([]RunItem, len(cfg.Build.Run))

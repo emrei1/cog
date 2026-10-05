@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/replicate/cog/pkg/accelerator"
 	"github.com/replicate/cog/pkg/util/version"
 )
 
@@ -61,7 +62,7 @@ func (c *GPUCompatibilityCheck) Check(ctx *CheckContext) ([]Finding, error) {
 	if os.Getenv("COG_SKIP_GPU_CHECK") != "" {
 		return nil, nil
 	}
-	if ctx.Config == nil || ctx.Config.Build == nil || !ctx.Config.Build.GPU {
+	if ctx.Config == nil || ctx.Config.Build == nil || ctx.Config.Accelerator() != accelerator.NVIDIA {
 		return nil, nil
 	}
 

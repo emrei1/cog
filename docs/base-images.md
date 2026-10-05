@@ -56,7 +56,10 @@ The `--use-cuda-base-image` flag controls which underlying base image Cog uses *
 When you disable the Cog base image with `--use-cog-base-image=false`, Cog chooses the base image automatically:
 
 - **GPU models** (`gpu: true` in `cog.yaml`): uses an NVIDIA CUDA base image.
+- **AMD models** (`accelerator: amd`): uses an AMD ROCm base image.
 - **CPU models**: uses a slim Python base image.
+
+Cog base images are only available for CPU and NVIDIA models. AMD models always use the generated Dockerfile with a ROCm base image; see [GPU accelerators](accelerators.md).
 
 These flags — along with `--dockerfile` — are **mutually exclusive**: you can only set one of them explicitly on a given command. To customize the base image, disable the Cog base image and let Cog choose between CUDA and Python automatically.
 

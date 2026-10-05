@@ -56,6 +56,8 @@ cog build [flags]
 **Options**
 
 ```
+      --accelerator string           Accelerator to build the image for: 'cpu', 'nvidia', 'amd', or 'auto' (use cog.yaml's accelerator, or detect this machine's GPU if cog.yaml doesn't set one). Overrides build.gpu and build.accelerator in cog.yaml
+      --accelerator-version string   Accelerator toolkit version: the CUDA version for nvidia, the ROCm version for amd. Overrides build.cuda or build.rocm in cog.yaml
   -f, --file string                  The name of the config file. (default "cog.yaml")
   -h, --help                         help for build
       --no-cache                     Do not use cache when building the image
@@ -65,7 +67,7 @@ cog build [flags]
       --separate-weights             Separate model weights from code in image layers
   -t, --tag string                   A name for the built image in the form 'repository:tag'
       --use-cog-base-image           Use pre-built Cog base image for faster cold boots (default true)
-      --use-cuda-base-image string   Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
+      --use-cuda-base-image string   Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
 ```
 
 ## `cog doctor`
@@ -120,6 +122,8 @@ cog exec <command> [arg...] [flags]
 **Options**
 
 ```
+      --accelerator string           Accelerator to build the image for: 'cpu', 'nvidia', 'amd', or 'auto' (use cog.yaml's accelerator, or detect this machine's GPU if cog.yaml doesn't set one). Overrides build.gpu and build.accelerator in cog.yaml
+      --accelerator-version string   Accelerator toolkit version: the CUDA version for nvidia, the ROCm version for amd. Overrides build.cuda or build.rocm in cog.yaml
   -e, --env stringArray              Environment variables, in the form name=value
   -f, --file string                  The name of the config file. (default "cog.yaml")
       --gpus docker run --gpus       GPU devices to add to the container, in the same format as docker run --gpus.
@@ -127,7 +131,7 @@ cog exec <command> [arg...] [flags]
       --progress string              Set type of build progress output, 'auto' (default), 'tty', 'plain', or 'quiet' (default "auto")
   -p, --publish stringArray          Publish a container's port to the host, e.g. -p 8000 or -p 0.0.0.0:8000
       --use-cog-base-image           Use pre-built Cog base image for faster cold boots (default true)
-      --use-cuda-base-image string   Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
+      --use-cuda-base-image string   Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
 ```
 
 ## `cog init`
@@ -256,6 +260,8 @@ cog push [TARGET] [flags]
 **Options**
 
 ```
+      --accelerator string           Accelerator to build the image for: 'cpu', 'nvidia', 'amd', or 'auto' (use cog.yaml's accelerator, or detect this machine's GPU if cog.yaml doesn't set one). Overrides build.gpu and build.accelerator in cog.yaml
+      --accelerator-version string   Accelerator toolkit version: the CUDA version for nvidia, the ROCm version for amd. Overrides build.cuda or build.rocm in cog.yaml
   -f, --file string                  The name of the config file. (default "cog.yaml")
   -h, --help                         help for push
       --json                         Output the pushed references as JSON
@@ -265,7 +271,7 @@ cog push [TARGET] [flags]
       --secret stringArray           Secrets to pass to the build environment in the form 'id=foo,src=/path/to/file'
       --separate-weights             Separate model weights from code in image layers
       --use-cog-base-image           Use pre-built Cog base image for faster cold boots (default true)
-      --use-cuda-base-image string   Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
+      --use-cuda-base-image string   Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
 ```
 
 ## `cog run`
@@ -307,6 +313,8 @@ cog run [image] [flags]
 **Options**
 
 ```
+      --accelerator string           Accelerator to build the image for: 'cpu', 'nvidia', 'amd', or 'auto' (use cog.yaml's accelerator, or detect this machine's GPU if cog.yaml doesn't set one). Overrides build.gpu and build.accelerator in cog.yaml
+      --accelerator-version string   Accelerator toolkit version: the CUDA version for nvidia, the ROCm version for amd. Overrides build.cuda or build.rocm in cog.yaml
   -e, --env stringArray              Environment variables, in the form name=value
   -f, --file string                  The name of the config file. (default "cog.yaml")
       --gpus docker run --gpus       GPU devices to add to the container, in the same format as docker run --gpus.
@@ -317,7 +325,7 @@ cog run [image] [flags]
       --progress string              Set type of build progress output, 'auto' (default), 'tty', 'plain', or 'quiet' (default "auto")
       --setup-timeout uint32         The timeout for a container to setup (in seconds). (default 300)
       --use-cog-base-image           Use pre-built Cog base image for faster cold boots (default true)
-      --use-cuda-base-image string   Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
+      --use-cuda-base-image string   Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
       --use-replicate-token          Pass REPLICATE_API_TOKEN from local environment into the model context
 ```
 
@@ -362,6 +370,8 @@ cog serve [flags]
 **Options**
 
 ```
+      --accelerator string           Accelerator to build the image for: 'cpu', 'nvidia', 'amd', or 'auto' (use cog.yaml's accelerator, or detect this machine's GPU if cog.yaml doesn't set one). Overrides build.gpu and build.accelerator in cog.yaml
+      --accelerator-version string   Accelerator toolkit version: the CUDA version for nvidia, the ROCm version for amd. Overrides build.cuda or build.rocm in cog.yaml
   -f, --file string                  The name of the config file. (default "cog.yaml")
       --gpus docker run --gpus       GPU devices to add to the container, in the same format as docker run --gpus.
   -h, --help                         help for serve
@@ -372,5 +382,5 @@ cog serve [flags]
       --progress string              Set type of build progress output, 'auto' (default), 'tty', 'plain', or 'quiet' (default "auto")
       --upload-url string            Upload URL for file outputs (e.g. https://example.com/upload/)
       --use-cog-base-image           Use pre-built Cog base image for faster cold boots (default true)
-      --use-cuda-base-image string   Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
+      --use-cuda-base-image string   Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
 ```

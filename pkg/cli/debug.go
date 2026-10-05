@@ -9,7 +9,6 @@ import (
 	"github.com/replicate/cog/pkg/config"
 	"github.com/replicate/cog/pkg/docker"
 	"github.com/replicate/cog/pkg/dockerfile"
-	"github.com/replicate/cog/pkg/model"
 	"github.com/replicate/cog/pkg/registry"
 	"github.com/replicate/cog/pkg/util/console"
 )
@@ -26,6 +25,7 @@ func newDebugCommand() *cobra.Command {
 
 	addSeparateWeightsFlag(cmd)
 	addUseCudaBaseImageFlag(cmd)
+	addAcceleratorFlags(cmd)
 	addDockerfileFlag(cmd)
 	addUseCogBaseImageFlag(cmd)
 	addBuildTimestampFlag(cmd)
@@ -38,7 +38,7 @@ func newDebugCommand() *cobra.Command {
 func cmdDockerfile(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 
-	src, err := model.NewSource(configFilename)
+	src, err := loadSource(cmd)
 	if err != nil {
 		return err
 	}

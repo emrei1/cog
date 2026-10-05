@@ -6,6 +6,8 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+
+	"github.com/replicate/cog/pkg/accelerator"
 )
 
 // PushResult identifies the manifest uploaded by a Docker push.
@@ -94,18 +96,23 @@ type ImageBuildOptions struct {
 const DefaultHostIP = "127.0.0.1"
 
 type RunOptions struct {
-	Detach     bool
-	Args       []string
-	Env        []string
-	GPUs       string
-	Image      string
-	Ports      []Port
-	Volumes    []Volume
-	Workdir    string
-	ExtraHosts []string
-	Stdin      io.Reader
-	Stdout     io.Writer
-	Stderr     io.Writer
+	Detach bool
+	Args   []string
+	Env    []string
+	// GPUs selects GPUs in `docker run --gpus` syntax ("all", a count, or
+	// "device=ID,..."). Empty runs without GPUs.
+	GPUs string
+	// Accelerator is the accelerator the image was built for. It decides how
+	// GPUs are exposed to the container; empty or cpu means NVIDIA.
+	Accelerator accelerator.Kind
+	Image       string
+	Ports       []Port
+	Volumes     []Volume
+	Workdir     string
+	ExtraHosts  []string
+	Stdin       io.Reader
+	Stdout      io.Writer
+	Stderr      io.Writer
 }
 
 type Port struct {

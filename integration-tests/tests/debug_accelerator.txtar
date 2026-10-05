@@ -1,0 +1,76 @@
+# Test that the accelerator selects the generated Dockerfile's base image and
+# environment. None of this needs the target GPU on the build machine.
+
+# build.accelerator: amd in cog.yaml uses the ROCm base image
+cog debug
+stdout 'FROM rocm/dev-ubuntu-22.04:6.2'
+stdout 'ENV PATH=\$PATH:/opt/rocm/bin'
+! stdout 'nvidia'
+! stdout 'NVIDIA_DRIVER_CAPABILITIES'
+
+# --accelerator-version overrides build.rocm
+cog debug --accelerator-version 6.4
+stdout 'FROM rocm/dev-ubuntu-22.04:6.4'
+
+# --accelerator overrides cog.yaml
+cog debug --accelerator nvidia --use-cog-base-image=false
+stdout 'FROM nvidia/cuda:'
+stdout 'NVIDIA_DRIVER_CAPABILITIES=all'
+! stdout 'rocm'
+
+cog debug --accelerator cpu --use-cog-base-image=false
+stdout 'FROM python:3.12-slim'
+! stdout 'rocm'
+
+# gpu: true keeps meaning NVIDIA
+cp cog-gpu.yaml cog.yaml
+cog debug --use-cog-base-image=false
+stdout 'FROM nvidia/cuda:'
+! stdout 'rocm'
+
+# ...unless an AMD build is requested explicitly
+cog debug --accelerator amd
+stdout 'FROM rocm/dev-ubuntu-22.04:'
+! stdout 'nvidia/cuda'
+
+# Invalid selections fail early with a useful message
+! cog debug --accelerator tpu
+stderr 'unsupported accelerator "tpu"'
+
+! cog debug --accelerator amd --accelerator-version 5.7
+stderr 'minimum supported ROCm version is 6.0'
+
+! cog debug --accelerator cpu --accelerator-version 12.4
+stderr 'requires a GPU accelerator'
+
+cp cog-amd-cuda.yaml cog.yaml
+! cog debug
+stderr 'only applies to accelerator nvidia'
+
+-- cog.yaml --
+build:
+  python_version: "3.12"
+  accelerator: amd
+  rocm: "6.2"
+run: "predict.py:Predictor"
+
+-- cog-gpu.yaml --
+build:
+  python_version: "3.12"
+  gpu: true
+run: "predict.py:Predictor"
+
+-- cog-amd-cuda.yaml --
+build:
+  python_version: "3.12"
+  accelerator: amd
+  cuda: "12.4"
+run: "predict.py:Predictor"
+
+-- predict.py --
+from cog import BasePredictor
+
+
+class Predictor(BasePredictor):
+    def predict(self, s: str) -> str:
+        return "hello " + s

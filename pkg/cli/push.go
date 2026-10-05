@@ -60,6 +60,7 @@ reference in the result is digest-pinned.`,
 	addSeparateWeightsFlag(cmd)
 	addSchemaFlag(cmd)
 	addUseCudaBaseImageFlag(cmd)
+	addAcceleratorFlags(cmd)
 	addDockerfileFlag(cmd)
 	addBuildProgressOutputFlag(cmd)
 	addUseCogBaseImageFlag(cmd)
@@ -82,7 +83,7 @@ func push(cmd *cobra.Command, args []string, jsonOutput bool) error {
 		return err
 	}
 
-	src, err := model.NewSource(configFilename)
+	src, err := loadSource(cmd)
 	if err != nil {
 		return err
 	}

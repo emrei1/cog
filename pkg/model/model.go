@@ -7,6 +7,7 @@ import (
 
 	"github.com/getkin/kin-openapi/openapi3"
 
+	"github.com/replicate/cog/pkg/accelerator"
 	"github.com/replicate/cog/pkg/config"
 	"github.com/replicate/cog/pkg/weights/lockfile"
 )
@@ -143,6 +144,14 @@ func WeightsFromLockfile(projectDir string) ([]Weight, error) {
 // HasGPU returns true if the model requires GPU.
 func (m *Model) HasGPU() bool {
 	return m.Config != nil && m.Config.Build != nil && m.Config.Build.GPU
+}
+
+// Accelerator returns the accelerator the model's image was built for.
+func (m *Model) Accelerator() accelerator.Kind {
+	if m.Config == nil {
+		return accelerator.CPU
+	}
+	return m.Config.Accelerator()
 }
 
 // SchemaJSON returns the OpenAPI schema as JSON bytes, or nil if no schema.

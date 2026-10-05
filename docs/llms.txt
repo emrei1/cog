@@ -244,6 +244,193 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to set up a development environme
 
 ---
 
+# GPU accelerators
+
+Cog can build images for three targets:
+
+| Accelerator | Toolkit | Base image                                         | Runtime device access                 |
+| ----------- | ------- | -------------------------------------------------- | ------------------------------------- |
+| `cpu`       | none    | `python:<version>-slim`                            | none                                  |
+| `nvidia`    | CUDA    | `nvidia/cuda` or [Cog base images](base-images.md) | `--gpus` (NVIDIA Container Toolkit)   |
+| `amd`       | ROCm    | `rocm/dev-ubuntu-22.04`                            | `/dev/kfd` and `/dev/dri` passthrough |
+
+Cog packages and configures the accelerator's userspace environment. Your model code doesn't change: PyTorch runs on CUDA in an NVIDIA image and on ROCm/HIP in an AMD image, through the same `torch.cuda` APIs.
+
+## Choosing an accelerator
+
+Set the accelerator in [`cog.yaml`](yaml.md#accelerator):
+
+```yaml
+build:
+  accelerator: amd
+  python_version: "3.12"
+  python_packages:
+    - torch==2.5.1
+```
+
+Or choose it when you build, which overrides `cog.yaml`:
+
+```console
+cog build --accelerator amd
+cog build --accelerator nvidia
+cog build --accelerator cpu
+```
+
+`--accelerator-version` sets the toolkit version for the chosen accelerator: the CUDA version for `nvidia` and the ROCm version for `amd`. It overrides [`build.cuda`](yaml.md#cuda) or [`build.rocm`](yaml.md#rocm):
+
+```console
+cog build --accelerator amd --accelerator-version 6.2
+cog build --accelerator nvidia --accelerator-version 12.4
+```
+
+Both flags work with every command that builds an image: `cog build`, `cog push`, `cog predict`, `cog serve`, `cog train` and `cog exec`.
+
+Cog resolves the accelerator in this order:
+
+1. `--accelerator cpu`, `--accelerator nvidia` or `--accelerator amd`
+2. `build.accelerator` in `cog.yaml`, otherwise `build.gpu` (`gpu: true` means `nvidia`)
+3. With `--accelerator auto` only: the GPU detected on the build machine
+4. `cpu`
+
+When `--accelerator` changes the accelerator from the one in `cog.yaml`, Cog ignores toolkit settings that belong to another accelerator (for example `build.cuda` when building for `amd`) and prints a warning.
+
+### The build machine doesn't need the target GPU
+
+An explicit accelerator never looks at the build machine's hardware. You can build an AMD image on a laptop without a GPU, on an NVIDIA workstation, or in CI. The build only needs Docker. The GPU is only needed when the image runs.
+
+### `--accelerator auto`
+
+`--accelerator auto` uses the accelerator declared in `cog.yaml`. If `cog.yaml` declares neither `accelerator` nor `gpu`, Cog looks at the build machine:
+
+- `nvidia` if it finds the NVIDIA driver (`/proc/driver/nvidia/version` or `nvidia-smi`)
+- `amd` if it finds `/dev/kfd`
+- `cpu` if it finds neither
+- an error if it finds both, so you can choose explicitly
+
+The result depends on the machine you build on, so the same project can produce different images on different machines. Cog prints the detected accelerator. Use an explicit accelerator for reproducible builds. For the same reason, `auto` isn't accepted in `cog.yaml`, and it isn't the default: without `--accelerator`, Cog builds exactly what `cog.yaml` says.
+
+## Existing projects and `gpu: true`
+
+Existing projects behave exactly as before:
+
+- `gpu: true` means an NVIDIA CUDA image. Cog never treats it as AMD or auto-detects anything for it.
+- No `gpu` (or `gpu: false`) means a CPU image.
+- Images built for CPU or NVIDIA have the same `run.cog.config` label as before. Only AMD images add `"accelerator": "amd"` and `"rocm"` to it.
+
+`accelerator: nvidia` is equivalent to `gpu: true`, and `accelerator: cpu` is equivalent to `gpu: false`. You can set both `gpu` and `accelerator` as long as they agree: `gpu: false` with `accelerator: amd` is an error.
+
+## NVIDIA (CUDA)
+
+NVIDIA support is unchanged. Cog picks CUDA and cuDNN versions that match your PyTorch or TensorFlow version, installs the matching CUDA builds of `torch` and `torchvision`, and uses a [Cog base image](base-images.md) or an `nvidia/cuda` base image.
+
+When you run the image with `cog predict`, `cog serve`, `cog train` or `cog exec`, Cog requests all GPUs, like `docker run --gpus all`. This needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host. If the host has no NVIDIA driver, Cog retries without a GPU.
+
+## AMD (ROCm)
+
+### What's in the image
+
+An AMD image contains the ROCm **userspace**. It doesn't contain the kernel driver, which must come from the host:
+
+| Where | What                                                                                           |
+| ----- | ---------------------------------------------------------------------------------------------- |
+| Host  | Linux kernel, AMD GPU, `amdgpu` kernel driver, `/dev/kfd`, `/dev/dri`                          |
+| Image | ROCm userspace from `rocm/dev-ubuntu-22.04:<rocm>`, Python, ROCm builds of PyTorch, your model |
+
+Cog builds AMD images like this:
+
+- The base image is AMD's `rocm/dev-ubuntu-22.04:<rocm>`, which provides the HIP runtime and tools such as `rocminfo` and `rocm-smi`. Cog installs the requested Python version with uv.
+- `torch`, `torchvision` and `torchaudio` come from the PyTorch ROCm package index, `https://download.pytorch.org/whl/rocm<rocm>/`. These wheels bundle the ROCm libraries they were built against.
+- `/opt/rocm/bin` is on `PATH`. No NVIDIA environment variables are set.
+
+### ROCm versions
+
+| ROCm  | PyTorch         |
+| ----- | --------------- |
+| 6.0   | 2.3.0 – 2.4.1   |
+| 6.1   | 2.4.0 – 2.6.0   |
+| 6.2   | 2.5.0, 2.5.1    |
+| 6.2.4 | 2.6.0 – 2.7.1   |
+| 6.3   | 2.7.0 – 2.9.1   |
+| 6.4   | 2.8.0 – 2.9.1   |
+| 7.0   | 2.10.0          |
+| 7.1   | 2.10.0 – 2.13.0 |
+| 7.2   | 2.11.0 – 2.14.1 |
+
+Cog chooses the ROCm version like this:
+
+- If you set `build.rocm` or `--accelerator-version`, Cog uses that version. The build fails if it isn't in the table, or if the pinned `torch` or `torchvision` has no build for it. The error lists the ROCm versions that do have it.
+- Otherwise, Cog picks the newest ROCm version that has the pinned `torch` and `torchvision`.
+- If neither is pinned, Cog uses the newest ROCm version.
+
+Pin `torch` to an exact version (`torch==2.5.1`). If it isn't pinned, pip may install the newest CUDA build from PyPI instead of the ROCm build, and Cog prints a warning. Requirements that set their own `--extra-index-url` are left as they are.
+
+### Building
+
+```console
+cog build -t my-model --accelerator amd
+```
+
+This works on any machine with Docker; it doesn't need an AMD GPU.
+
+`--use-cuda-base-image=false` also applies to AMD: Cog uses `python:<version>-slim` instead of the ROCm base image and relies on the libraries bundled in the PyTorch ROCm wheels. The image is smaller, but tools such as `rocminfo` aren't available.
+
+If you compile GPU extensions during the build (for example in [`run`](yaml.md#run) commands), the build machine has no GPU for them to detect. Set the target architecture with `environment` in `cog.yaml`, which also applies during the build:
+
+```yaml
+environment:
+  - PYTORCH_ROCM_ARCH=gfx1100
+```
+
+### Host requirements
+
+To run an AMD image, the host needs:
+
+- Linux on x86_64
+- an AMD GPU [supported by ROCm](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html)
+- the `amdgpu` kernel driver loaded, which provides `/dev/kfd` and `/dev/dri/renderD*`. Install it with [AMD's driver instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/). You don't need ROCm itself on the host.
+- Docker
+
+You don't need the AMD Container Toolkit.
+
+### Running
+
+`cog predict`, `cog serve`, `cog train` and `cog exec` pass the GPU devices to the container automatically. They add `/dev/kfd` and `/dev/dri`, and add the container to the groups that own those devices on the host.
+
+`--gpus` selects GPUs the same way it does for NVIDIA. Because every AMD GPU shares `/dev/kfd`, Cog applies the selection with `ROCR_VISIBLE_DEVICES`:
+
+```console
+cog predict -i prompt="hello"                  # all GPUs
+cog predict --gpus device=0,1 -i prompt="hello" # GPUs 0 and 1
+cog predict --gpus 1 -i prompt="hello"          # the first GPU
+```
+
+If the host doesn't have `/dev/kfd` or any render nodes, Cog stops with an error that explains what's missing. Unlike NVIDIA images, it doesn't fall back to running on the CPU.
+
+To run an AMD image with Docker directly:
+
+```console
+docker run -d -p 5001:5000 \
+  --device=/dev/kfd --device=/dev/dri \
+  --group-add video \
+  --group-add "$(getent group render | cut -d: -f3)" \
+  my-model
+```
+
+Some consumer GPUs that ROCm doesn't officially support work if you set `HSA_OVERRIDE_GFX_VERSION`, for example `-e HSA_OVERRIDE_GFX_VERSION=10.3.0` with `cog predict` or `docker run`.
+
+### Limitations
+
+- There are no [Cog base images](base-images.md) for AMD, so builds take longer and models start more slowly than NVIDIA models that use them. `--use-cog-base-image=true` with `--accelerator amd` is an error.
+- Cog doesn't map TensorFlow to a ROCm build. `tensorflow` installs the CPU build; use `tensorflow-rocm` yourself.
+- AMD images are `linux/amd64` only.
+- `cog predict` and the other run commands look for the AMD devices on the machine running Cog. A remote Docker daemon (`DOCKER_HOST`) needs the same devices.
+- The ROCm and PyTorch version table is built into Cog. Newer ROCm releases need a newer Cog, or you can set the package index yourself with `--extra-index-url`.
+- `cog doctor`'s GPU compatibility check only covers NVIDIA.
+- Tools and platforms that only read `"gpu": true` from the image's `run.cog.config` label can't tell an AMD image from an NVIDIA image. Check the `accelerator` field.
+
+
+---
+
 # Base images
 
 Cog builds your model into a Docker image. To speed up builds and reduce cold boot times, Cog uses **prebuilt base images** by default. These images contain the common dependencies that most models need, so Cog doesn't have to install them from scratch every time you build or push.
@@ -302,7 +489,10 @@ The `--use-cuda-base-image` flag controls which underlying base image Cog uses *
 When you disable the Cog base image with `--use-cog-base-image=false`, Cog chooses the base image automatically:
 
 - **GPU models** (`gpu: true` in `cog.yaml`): uses an NVIDIA CUDA base image.
+- **AMD models** (`accelerator: amd`): uses an AMD ROCm base image.
 - **CPU models**: uses a slim Python base image.
+
+Cog base images are only available for CPU and NVIDIA models. AMD models always use the generated Dockerfile with a ROCm base image; see [GPU accelerators](accelerators.md).
 
 These flags — along with `--dockerfile` — are **mutually exclusive**: you can only set one of them explicitly on a given command. To customize the base image, disable the Cog base image and let Cog choose between CUDA and Python automatically.
 
@@ -377,6 +567,8 @@ cog build [flags]
 **Options**
 
 ```
+      --accelerator string           Accelerator to build the image for: 'cpu', 'nvidia', 'amd', or 'auto' (use cog.yaml's accelerator, or detect this machine's GPU if cog.yaml doesn't set one). Overrides build.gpu and build.accelerator in cog.yaml
+      --accelerator-version string   Accelerator toolkit version: the CUDA version for nvidia, the ROCm version for amd. Overrides build.cuda or build.rocm in cog.yaml
   -f, --file string                  The name of the config file. (default "cog.yaml")
   -h, --help                         help for build
       --no-cache                     Do not use cache when building the image
@@ -386,7 +578,7 @@ cog build [flags]
       --separate-weights             Separate model weights from code in image layers
   -t, --tag string                   A name for the built image in the form 'repository:tag'
       --use-cog-base-image           Use pre-built Cog base image for faster cold boots (default true)
-      --use-cuda-base-image string   Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
+      --use-cuda-base-image string   Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
 ```
 
 ## `cog doctor`
@@ -441,6 +633,8 @@ cog exec <command> [arg...] [flags]
 **Options**
 
 ```
+      --accelerator string           Accelerator to build the image for: 'cpu', 'nvidia', 'amd', or 'auto' (use cog.yaml's accelerator, or detect this machine's GPU if cog.yaml doesn't set one). Overrides build.gpu and build.accelerator in cog.yaml
+      --accelerator-version string   Accelerator toolkit version: the CUDA version for nvidia, the ROCm version for amd. Overrides build.cuda or build.rocm in cog.yaml
   -e, --env stringArray              Environment variables, in the form name=value
   -f, --file string                  The name of the config file. (default "cog.yaml")
       --gpus docker run --gpus       GPU devices to add to the container, in the same format as docker run --gpus.
@@ -448,7 +642,7 @@ cog exec <command> [arg...] [flags]
       --progress string              Set type of build progress output, 'auto' (default), 'tty', 'plain', or 'quiet' (default "auto")
   -p, --publish stringArray          Publish a container's port to the host, e.g. -p 8000 or -p 0.0.0.0:8000
       --use-cog-base-image           Use pre-built Cog base image for faster cold boots (default true)
-      --use-cuda-base-image string   Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
+      --use-cuda-base-image string   Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
 ```
 
 ## `cog init`
@@ -577,6 +771,8 @@ cog push [TARGET] [flags]
 **Options**
 
 ```
+      --accelerator string           Accelerator to build the image for: 'cpu', 'nvidia', 'amd', or 'auto' (use cog.yaml's accelerator, or detect this machine's GPU if cog.yaml doesn't set one). Overrides build.gpu and build.accelerator in cog.yaml
+      --accelerator-version string   Accelerator toolkit version: the CUDA version for nvidia, the ROCm version for amd. Overrides build.cuda or build.rocm in cog.yaml
   -f, --file string                  The name of the config file. (default "cog.yaml")
   -h, --help                         help for push
       --json                         Output the pushed references as JSON
@@ -586,7 +782,7 @@ cog push [TARGET] [flags]
       --secret stringArray           Secrets to pass to the build environment in the form 'id=foo,src=/path/to/file'
       --separate-weights             Separate model weights from code in image layers
       --use-cog-base-image           Use pre-built Cog base image for faster cold boots (default true)
-      --use-cuda-base-image string   Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
+      --use-cuda-base-image string   Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
 ```
 
 ## `cog run`
@@ -628,6 +824,8 @@ cog run [image] [flags]
 **Options**
 
 ```
+      --accelerator string           Accelerator to build the image for: 'cpu', 'nvidia', 'amd', or 'auto' (use cog.yaml's accelerator, or detect this machine's GPU if cog.yaml doesn't set one). Overrides build.gpu and build.accelerator in cog.yaml
+      --accelerator-version string   Accelerator toolkit version: the CUDA version for nvidia, the ROCm version for amd. Overrides build.cuda or build.rocm in cog.yaml
   -e, --env stringArray              Environment variables, in the form name=value
   -f, --file string                  The name of the config file. (default "cog.yaml")
       --gpus docker run --gpus       GPU devices to add to the container, in the same format as docker run --gpus.
@@ -638,7 +836,7 @@ cog run [image] [flags]
       --progress string              Set type of build progress output, 'auto' (default), 'tty', 'plain', or 'quiet' (default "auto")
       --setup-timeout uint32         The timeout for a container to setup (in seconds). (default 300)
       --use-cog-base-image           Use pre-built Cog base image for faster cold boots (default true)
-      --use-cuda-base-image string   Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
+      --use-cuda-base-image string   Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
       --use-replicate-token          Pass REPLICATE_API_TOKEN from local environment into the model context
 ```
 
@@ -683,6 +881,8 @@ cog serve [flags]
 **Options**
 
 ```
+      --accelerator string           Accelerator to build the image for: 'cpu', 'nvidia', 'amd', or 'auto' (use cog.yaml's accelerator, or detect this machine's GPU if cog.yaml doesn't set one). Overrides build.gpu and build.accelerator in cog.yaml
+      --accelerator-version string   Accelerator toolkit version: the CUDA version for nvidia, the ROCm version for amd. Overrides build.cuda or build.rocm in cog.yaml
   -f, --file string                  The name of the config file. (default "cog.yaml")
       --gpus docker run --gpus       GPU devices to add to the container, in the same format as docker run --gpus.
   -h, --help                         help for serve
@@ -693,7 +893,7 @@ cog serve [flags]
       --progress string              Set type of build progress output, 'auto' (default), 'tty', 'plain', or 'quiet' (default "auto")
       --upload-url string            Upload URL for file outputs (e.g. https://example.com/upload/)
       --use-cog-base-image           Use pre-built Cog base image for faster cold boots (default true)
-      --use-cuda-base-image string   Use Nvidia CUDA base image, 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
+      --use-cuda-base-image string   Use the accelerator vendor base image (NVIDIA CUDA or AMD ROCm), 'true' (default) or 'false' (use python base image). False results in a smaller image but may cause problems for non-torch projects (default "auto")
 ```
 
 
@@ -813,9 +1013,15 @@ This is the approach you'd use for production deployment.
 # If your model uses a CPU:
 docker run -d -p 5001:5000 my-model
 
-# If your model uses a GPU:
+# If your model uses an NVIDIA GPU:
 docker run -d -p 5001:5000 --gpus all my-model
+
+# If your model uses an AMD GPU (accelerator: amd):
+docker run -d -p 5001:5000 --device=/dev/kfd --device=/dev/dri \
+  --group-add video --group-add "$(getent group render | cut -d: -f3)" my-model
 ```
+
+See [GPU accelerators](accelerators.md) for the host requirements for AMD GPUs.
 
 The server listens on port 5000 inside the container (mapped to 5001 above).
 
@@ -4033,9 +4239,20 @@ This stanza describes how to build the Docker image your model runs in. It conta
 
 <!-- Alphabetical order, please! -->
 
+### `accelerator`
+
+The accelerator the image is built for: `cpu`, `nvidia` (CUDA) or `amd` (ROCm). For example:
+
+```yaml
+build:
+  accelerator: amd
+```
+
+When `accelerator` isn't set, [`gpu`](#gpu) decides: `gpu: true` means `nvidia`, otherwise `cpu`. If you set both, they must agree. You can override this with `cog build --accelerator`. See [GPU accelerators](accelerators.md) for details, including how AMD images are built and run.
+
 ### `cuda`
 
-Cog automatically picks the correct version of CUDA to install, but this lets you override it for whatever reason by specifying the minor (`11.8`) or patch (`11.8.0`) version of CUDA to use.
+Cog automatically picks the correct version of CUDA to install, but this lets you override it for whatever reason by specifying the minor (`11.8`) or patch (`11.8.0`) version of CUDA to use. It only applies to NVIDIA images, and it's an error to set it with `accelerator: amd`.
 
 For example:
 
@@ -4046,7 +4263,9 @@ build:
 
 ### `gpu`
 
-Enable GPUs for this model. When enabled, the [nvidia-docker](https://github.com/NVIDIA/nvidia-docker) base image will be used, and Cog will automatically figure out what versions of CUDA and cuDNN to use based on the version of Python, PyTorch, and Tensorflow that you are using.
+Enable NVIDIA GPUs for this model. When enabled, the [nvidia-docker](https://github.com/NVIDIA/nvidia-docker) base image will be used, and Cog will automatically figure out what versions of CUDA and cuDNN to use based on the version of Python, PyTorch, and Tensorflow that you are using.
+
+`gpu: true` is equivalent to `accelerator: nvidia`. To build for AMD GPUs, use [`accelerator: amd`](#accelerator) instead.
 
 For example:
 
@@ -4147,6 +4366,18 @@ build:
 Cog supports Python 3.10, 3.11, 3.12, and 3.13. If you don't define a version, Cog will use the latest version of Python 3.13 or a version of Python that is compatible with the versions of PyTorch or TensorFlow you specify.
 
 Note that these are the versions supported **in the Docker container**, not your host machine. You can run any version(s) of Python you wish on your host machine.
+
+### `rocm`
+
+The ROCm version for `accelerator: amd`, for example:
+
+```yaml
+build:
+  accelerator: amd
+  rocm: "6.2"
+```
+
+When it isn't set, Cog picks the newest ROCm version that has a build of your pinned `torch` and `torchvision`. It's an error to set it for any other accelerator. See [ROCm versions](accelerators.md#rocm-versions) for the supported versions.
 
 ### `run`
 

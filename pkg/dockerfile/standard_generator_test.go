@@ -557,7 +557,7 @@ build:
 }
 
 // GPU builds on nvidia/cuda base images install Python via `uv python install`
-// (in installPythonCUDA), which marks it as externally managed (PEP 668). All
+// (in installPythonWithUV), which marks it as externally managed (PEP 668). All
 // pip install lines must include --break-system-packages.
 func TestGPUCUDAPathIncludesBreakSystemPackages(t *testing.T) {
 	tmpDir := t.TempDir()

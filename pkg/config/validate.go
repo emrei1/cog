@@ -17,6 +17,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/xeipuuv/gojsonschema"
 
+	"github.com/replicate/cog/pkg/accelerator"
 	"github.com/replicate/cog/pkg/requirements"
 )
 
@@ -298,9 +299,41 @@ func validateBuild(cfg *configFile, opts *validateOptions, result *ValidationRes
 		}
 	}
 
-	// Validate GPU-specific settings
-	if build.GetGPU() {
+	// Validate the accelerator and its toolkit settings
+	kind, err := acceleratorFromFile(build)
+	if err != nil {
+		result.AddError(err)
+		return
+	}
+	validateAcceleratorToolkit(kind, build, result)
+
+	// Validate NVIDIA-specific settings
+	if kind == accelerator.NVIDIA {
 		validateGPUConfig(cfg, opts, result)
+	}
+}
+
+// validateAcceleratorToolkit checks that toolkit fields match the accelerator
+// and that an explicit ROCm version is supported.
+func validateAcceleratorToolkit(kind accelerator.Kind, build *buildFile, result *ValidationResult) {
+	b := &Build{}
+	if build.CUDA != nil {
+		b.CUDA = *build.CUDA
+	}
+	if build.CuDNN != nil {
+		b.CuDNN = *build.CuDNN
+	}
+	if build.ROCm != nil {
+		b.ROCm = *build.ROCm
+	}
+	if err := validateToolkitFields(kind, b); err != nil {
+		result.AddError(err)
+		return
+	}
+	if b.ROCm != "" {
+		if _, err := accelerator.LookupROCm(b.ROCm); err != nil {
+			result.AddError(&ValidationError{Field: "build.rocm", Value: b.ROCm, Message: err.Error()})
+		}
 	}
 }
 
