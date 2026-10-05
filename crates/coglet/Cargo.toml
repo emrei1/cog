@@ -83,6 +83,7 @@ tracing-opentelemetry = { version = "=0.33.0", default-features = false, optiona
 nix = { version = "0.31", features = ["signal", "fs"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 insta.workspace = true
 tempfile = "3"
 wiremock = "0.6"

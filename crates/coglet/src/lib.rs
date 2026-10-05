@@ -6,6 +6,7 @@ mod prediction;
 mod predictor;
 mod version;
 
+pub mod batch;
 pub mod bridge;
 mod fd_redirect;
 pub mod orchestrator;
