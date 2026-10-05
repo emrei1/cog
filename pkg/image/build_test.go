@@ -114,6 +114,29 @@ func TestConfigWithDecoratorConcurrencyRejectsOldPythonVersion(t *testing.T) {
 	require.Contains(t, err.Error(), "Python 3.11 or higher")
 }
 
+func TestConfigWithDecoratorConcurrencySizesSlotsForBatching(t *testing.T) {
+	cfg := &config.Config{Build: &config.Build{PythonVersion: "3.10"}}
+	info := &schema.PredictorInfo{IsAsync: false, Batch: &schema.BatchInfo{MaxBatchSize: 8, MaxWaitMs: 5}}
+
+	got, err := configWithDecoratorConcurrency(cfg, info)
+
+	require.NoError(t, err)
+	require.Nil(t, cfg.Concurrency)
+	require.NotNil(t, got.Concurrency)
+	require.Equal(t, 16, got.Concurrency.Max)
+}
+
+func TestConfigWithDecoratorConcurrencyBatchingPreservesYAMLPrecedence(t *testing.T) {
+	cfg := &config.Config{Concurrency: &config.Concurrency{Max: 32}}
+	info := &schema.PredictorInfo{IsAsync: false, Batch: &schema.BatchInfo{MaxBatchSize: 8, MaxWaitMs: 5}}
+
+	got, err := configWithDecoratorConcurrency(cfg, info)
+
+	require.NoError(t, err)
+	require.Same(t, cfg, got)
+	require.Equal(t, 32, got.Concurrency.Max)
+}
+
 func TestConcurrencyDockerfileSetsEnv(t *testing.T) {
 	dockerfile := concurrencyDockerfile("my-image", 4)
 

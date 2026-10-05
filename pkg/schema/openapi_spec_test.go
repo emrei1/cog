@@ -750,6 +750,36 @@ func TestPredictionOperationIncludesStreamingExtensionWhenEnabled(t *testing.T) 
 	assert.Equal(t, true, post["x-cog-streaming"])
 }
 
+func TestPredictionOperationIncludesBatchExtension(t *testing.T) {
+	inputs := NewOrderedMap[string, InputField]()
+	info := &PredictorInfo{
+		Inputs: inputs,
+		Output: SchemaPrim(TypeString),
+		Mode:   ModePredict,
+		Batch:  &BatchInfo{MaxBatchSize: 8, MaxWaitMs: 5},
+	}
+
+	spec := parseSpec(t, info)
+	post := getPath(spec, "paths", "/predictions", "post").(map[string]any)
+	assert.Equal(t, map[string]any{"max_batch_size": float64(8), "max_wait_ms": float64(5)}, post["x-cog-batch"])
+
+	// The output schema describes a single request, not the batch.
+	output := getPath(spec, "components", "schemas", "Output").(map[string]any)
+	assert.Equal(t, "string", output["type"])
+}
+
+func TestPredictionOperationOmitsBatchExtensionByDefault(t *testing.T) {
+	info := &PredictorInfo{
+		Inputs: NewOrderedMap[string, InputField](),
+		Output: SchemaPrim(TypeString),
+		Mode:   ModePredict,
+	}
+
+	post := getPath(parseSpec(t, info), "paths", "/predictions", "post").(map[string]any)
+	_, ok := post["x-cog-batch"]
+	assert.False(t, ok)
+}
+
 func TestPredictionOperationOmitsStreamingExtensionByDefault(t *testing.T) {
 	inputs := NewOrderedMap[string, InputField]()
 	info := &PredictorInfo{

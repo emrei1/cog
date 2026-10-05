@@ -69,10 +69,18 @@ func ParseMetadataWithOptions(opts ParserOptions) (*schema.PredictorInfo, error)
 	if concurrencyMax != nil && *concurrencyMax > 1 && !isAsync {
 		return nil, schema.WrapError(schema.ErrUnsupportedType, "@concurrent(max > 1) requires an async run() or predict() method", nil)
 	}
+	batch, err := functionBatchConfig(state.TargetFunc.node, targetSource, state.TargetFunc.file.imports)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateBatchCombination(batch, opts.Mode, concurrencyMax, false); err != nil {
+		return nil, err
+	}
 	return &schema.PredictorInfo{
 		Mode:           opts.Mode,
 		ConcurrencyMax: concurrencyMax,
 		IsAsync:        isAsync,
+		Batch:          batch,
 	}, nil
 }
 
@@ -105,7 +113,26 @@ func ParseWithOptions(opts ParserOptions) (*schema.PredictorInfo, error) {
 		SupportsStreaming: state.SupportsStreaming,
 		ConcurrencyMax:    state.ConcurrencyMax,
 		IsAsync:           state.IsAsync,
+		Batch:             state.Batch,
 	}, nil
+}
+
+// validateBatchCombination rejects decorators and modes that cannot be
+// combined with @batch.
+func validateBatchCombination(batch *schema.BatchInfo, mode schema.Mode, concurrencyMax *int, streaming bool) error {
+	if batch == nil {
+		return nil
+	}
+	if mode == schema.ModeTrain {
+		return schema.WrapError(schema.ErrUnsupportedType, "@batch is only supported on run() / predict(), not train()", nil)
+	}
+	if concurrencyMax != nil && *concurrencyMax > 1 {
+		return schema.WrapError(schema.ErrUnsupportedType, "@batch cannot be combined with @concurrent(max > 1); batches already execute one at a time", nil)
+	}
+	if streaming {
+		return schema.WrapError(schema.ErrUnsupportedType, "@batch cannot be combined with @streaming; batched run() must return a list of complete outputs", nil)
+	}
+	return nil
 }
 
 func parseModulePhase(state *ParseState) error {
@@ -245,10 +272,24 @@ func extractInputsPhase(state *ParseState) error {
 		scope:      state.TargetFunc.file.moduleScope,
 		typedDicts: state.TargetFunc.file.typedDicts,
 	}
-	inputs, err := extractInputs(paramsNode, targetSource, isMethod, paramCtx)
+	batch, err := functionBatchConfig(funcNode, targetSource, state.TargetFunc.file.imports)
 	if err != nil {
 		return err
 	}
+	var inputs *schema.OrderedMap[string, schema.InputField]
+	if batch != nil {
+		if state.Options.Mode == schema.ModeTrain {
+			return validateBatchCombination(batch, state.Options.Mode, nil, false)
+		}
+		// The schema describes one request: the fields of the batch item.
+		inputs, err = extractBatchInputs(paramsNode, targetSource, paramCtx, state.TargetFunc.file)
+	} else {
+		inputs, err = extractInputs(paramsNode, targetSource, isMethod, paramCtx)
+	}
+	if err != nil {
+		return err
+	}
+	state.Batch = batch
 	state.Target = &TargetCallable{MethodName: actualMethodName, Node: funcNode, IsMethod: isMethod}
 	state.Inputs = inputs
 	state.IsAsync = functionIsAsync(funcNode, targetSource)
@@ -267,16 +308,28 @@ func resolveOutputPhase(state *ParseState) error {
 	if err != nil {
 		return err
 	}
-	output, err := schema.ResolveSchemaType(returnTypeAnn, state.TargetFunc.file.imports, state.TargetFunc.file.modelClasses)
+	var output schema.SchemaType
+	if state.Batch != nil {
+		// The schema describes one request: the element of list[Output].
+		output, err = batchOutputType(returnTypeAnn, state.TargetFunc.file)
+	} else {
+		output, err = schema.ResolveSchemaType(returnTypeAnn, state.TargetFunc.file.imports, state.TargetFunc.file.modelClasses)
+	}
 	if err != nil {
 		return err
 	}
 	supportsStreaming := functionSupportsStreaming(state.TargetFunc.node, state.TargetFunc.file.source, state.TargetFunc.file.imports)
+	if state.Batch != nil && supportsStreaming {
+		return validateBatchCombination(state.Batch, state.Options.Mode, nil, true)
+	}
 	if supportsStreaming && !supportsStreamingOutput(output) {
 		return schema.WrapError(schema.ErrUnsupportedType, "@streaming requires Iterator[...], AsyncIterator[...], ConcatenateIterator[...] or AsyncConcatenateIterator[...] return type", nil)
 	}
 	concurrencyMax, err := functionConcurrencyMax(state.TargetFunc.node, state.TargetFunc.file.source, state.TargetFunc.file.imports)
 	if err != nil {
+		return err
+	}
+	if err := validateBatchCombination(state.Batch, state.Options.Mode, concurrencyMax, supportsStreaming); err != nil {
 		return err
 	}
 	if concurrencyMax != nil && *concurrencyMax > 1 && !state.IsAsync {

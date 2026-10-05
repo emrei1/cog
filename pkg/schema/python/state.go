@@ -107,6 +107,7 @@ type ParseState struct {
 	ConcurrencyMax    *int
 	IsAsync           bool
 	OutputSet         bool
+	Batch             *schema.BatchInfo
 }
 
 func newParseState(opts ParserOptions) *ParseState {

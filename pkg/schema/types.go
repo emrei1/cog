@@ -249,6 +249,12 @@ func ValidateInputField(field InputField) error {
 	return nil
 }
 
+// BatchInfo is the @cog.batch configuration of a run() method.
+type BatchInfo struct {
+	MaxBatchSize int
+	MaxWaitMs    float64
+}
+
 // PredictorInfo is the top-level extraction result.
 type PredictorInfo struct {
 	Inputs            *OrderedMap[string, InputField]
@@ -257,6 +263,9 @@ type PredictorInfo struct {
 	SupportsStreaming bool
 	ConcurrencyMax    *int
 	IsAsync           bool
+	// Batch is set when run() uses @cog.batch. Inputs and Output then
+	// describe a single request, not the batch.
+	Batch *BatchInfo
 }
 
 // TypeAnnotation is a parsed Python type annotation (intermediate, before resolution).

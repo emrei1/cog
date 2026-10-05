@@ -222,6 +222,12 @@ func buildOpenAPISpec(info *PredictorInfo) map[string]any {
 	if !isTrain && info.SupportsStreaming {
 		mainOperation["x-cog-streaming"] = true
 	}
+	if !isTrain && info.Batch != nil {
+		mainOperation["x-cog-batch"] = map[string]any{
+			"max_batch_size": info.Batch.MaxBatchSize,
+			"max_wait_ms":    info.Batch.MaxWaitMs,
+		}
+	}
 	paths.Set(endpoint, map[string]any{"post": mainOperation})
 
 	// Cancel endpoint

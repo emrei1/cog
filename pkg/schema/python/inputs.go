@@ -390,12 +390,17 @@ func parseTypedDefaultParameter(node *sitter.Node, source []byte, order int, ctx
 		return schema.InputField{}, schema.WrapError(schema.ErrMissingTypeAnnotation, fmt.Sprintf("parameter '%s' on %s has no type annotation", name, ctx.methodName), nil)
 	}
 
+	return buildInputField(name, typeNode, node.ChildByFieldName("value"), source, order, ctx)
+}
+
+// buildInputField builds an input from a name, type annotation, and optional
+// default expression. It is shared by run() parameters and the fields of a
+// @batch item model.
+func buildInputField(name string, typeNode *sitter.Node, valNode *sitter.Node, source []byte, order int, ctx *inputParseContext) (schema.InputField, error) {
 	inputType, fieldType, err := resolveParameterInputTypes(typeNode, source, ctx)
 	if err != nil {
 		return schema.InputField{}, err
 	}
-
-	valNode := node.ChildByFieldName("value")
 
 	if valNode != nil {
 		// 1. Direct Input() call

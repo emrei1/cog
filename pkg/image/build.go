@@ -496,7 +496,22 @@ func generatePredictorMetadata(cfg *config.Config, dir string) (*schema.Predicto
 	return schema.GenerateInfo(cfg.Train, dir, schema.ModeTrain, schema.PathAwareParser(python.ParsePredictorMetadataWithSourcePath))
 }
 
+// batchSlotsPerBatch is how many concurrent predictions a @cog.batch runner
+// admits per max_batch_size: one batch executes while the next one forms.
+const batchSlotsPerBatch = 2
+
 func configWithDecoratorConcurrency(cfg *config.Config, info *schema.PredictorInfo) (*config.Config, error) {
+	if info != nil && info.Batch != nil {
+		// Batched runners queue requests in concurrent slots and execute one
+		// batch at a time, so sync run() methods may use concurrency > 1.
+		// An explicit concurrency.max in cog.yaml takes precedence.
+		if cfg.Concurrency != nil {
+			return cfg, validateEffectiveConcurrency(cfg, info)
+		}
+		cfgCopy := *cfg
+		cfgCopy.Concurrency = &config.Concurrency{Max: batchSlotsPerBatch * info.Batch.MaxBatchSize}
+		return &cfgCopy, validateEffectiveConcurrency(&cfgCopy, info)
+	}
 	if cfg.Concurrency != nil && cfg.Concurrency.Max > 1 && info != nil && !info.IsAsync {
 		return nil, fmt.Errorf("concurrency.max > 1 requires an async run() or predict() method")
 	}
@@ -554,6 +569,11 @@ func addTracingToCustomDockerfileImage(ctx context.Context, dockerCommand comman
 
 func validateEffectiveConcurrency(cfg *config.Config, info *schema.PredictorInfo) error {
 	if cfg.Concurrency == nil || cfg.Concurrency.Max <= 1 {
+		return nil
+	}
+	if info != nil && info.Batch != nil {
+		// Batched slots only queue requests for the batcher; they don't run
+		// the async concurrency machinery that needs a newer Python.
 		return nil
 	}
 	if info != nil && !info.IsAsync {
