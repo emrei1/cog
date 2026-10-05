@@ -17,6 +17,14 @@ This document defines the API of the `cog` Python module, which is used to defin
   - [`Runner.setup()`](#runnersetup)
   - [`Runner.run(**kwargs)`](#runnerrunkwargs)
 - [`async` runners and concurrency](#async-runners-and-concurrency)
+- [Dynamic batching](#dynamic-batching)
+  - [Batching is not a bulk API](#batching-is-not-a-bulk-api)
+  - [How batches form](#how-batches-form)
+  - [Latency vs. throughput](#latency-vs-throughput)
+  - [Batching and concurrency](#batching-and-concurrency)
+  - [Batch errors and cancellation](#batch-errors-and-cancellation)
+  - [Batch logs](#batch-logs)
+  - [Batching limitations](#batching-limitations)
 - [`Input(**kwargs)`](#inputkwargs)
   - [Deprecating inputs](#deprecating-inputs)
 - [Output](#output)
@@ -142,6 +150,86 @@ class Runner(cog.BaseRunner):
 Attempting to exceed this limit will return a 409 Conflict response. `max` values greater than `1` require an async `run()` method. The `COG_MAX_CONCURRENCY` environment variable can override the decorator at runtime.
 
 The `max` value must be an integer literal so Cog can configure the model at build time. Use `COG_MAX_CONCURRENCY` when you need to set concurrency dynamically at runtime.
+
+## Dynamic batching
+
+Accelerators like GPUs are often underused when a model processes one request at a time: each call pays the same fixed costs (kernel launches, reading the weights from memory) for a single input. Dynamic batching lets Cog collect independent requests that arrive close together and run them through your model in **one** call, which usually gives much higher throughput.
+
+Opt in by decorating `run()` with `@cog.batch`. A batched `run()` takes a list of input objects and returns a list of outputs, one per input, in the same order:
+
+```py
+import cog
+from cog import BaseModel, BaseRunner, Input
+
+
+class Item(BaseModel):
+    prompt: str = Input(description="Text to embed")
+    normalize: bool = Input(default=True)
+
+
+class Runner(BaseRunner):
+    def setup(self) -> None:
+        self.model = load_model()
+
+    @cog.batch(max_batch_size=8, max_wait_ms=5)
+    def run(self, inputs: list[Item]) -> list[list[float]]:
+        embeddings = self.model.embed([item.prompt for item in inputs])
+        return [
+            normalize(e) if item.normalize else e
+            for item, e in zip(inputs, embeddings)
+        ]
+```
+
+### Batching is not a bulk API
+
+Clients don't see batches. Each HTTP request is still a normal, independent prediction with one input (`{"input": {"prompt": "..."}}`) and one output, and the model's OpenAPI schema describes a single request: its `Input` is built from the fields of `Item`, and its `Output` is the element type of the returned list. Every prediction keeps its own ID, status, logs, metrics, webhook, and cancellation. This works the same for synchronous requests, `Prefer: respond-async` requests, and idempotent `PUT /predictions/<id>`. Batching only changes how Cog calls your model.
+
+### How batches form
+
+Cog queues incoming predictions and dispatches a batch as soon as either:
+
+- `max_batch_size` predictions are queued, or
+- the oldest queued prediction has waited `max_wait_ms` milliseconds.
+
+A request that arrives alone runs as a batch of one once `max_wait_ms` has passed. One batch executes at a time; requests that arrive while a batch is running queue up and are dispatched together as soon as it finishes, without waiting again.
+
+- `max_batch_size` (required): the largest number of predictions passed to one `run()` call (1–1024).
+- `max_wait_ms` (default `5`): how long the oldest queued prediction may wait for the batch to fill (0–60000). Both values must be literals so `cog build` can read them.
+
+### Latency vs. throughput
+
+`max_wait_ms` is the main tuning knob. Under light traffic, each prediction may wait up to `max_wait_ms` before running, so a larger value adds latency. Under heavy traffic, batches fill before the timeout, and a larger `max_batch_size` raises throughput as long as your model and hardware benefit from bigger batches. Start with a small `max_wait_ms` (a few milliseconds, or roughly 10% of your model's per-batch run time) and measure. The [`hello-batching`](https://github.com/replicate/cog/tree/main/examples/hello-batching) example includes a benchmark script that reports throughput, p50/p95 latency, and average batch size.
+
+The `predict_time` metric of a batched prediction measures the time it spent processing, including the time it waited for its batch. Batched predictions also record:
+
+- `batch_size`: how many predictions ran in the same `run()` call
+- `batch_queue_time`: seconds this prediction waited before its batch started
+- `batch_run_time`: seconds the `run()` call took
+
+### Batching and concurrency
+
+Batching uses Cog's concurrency slots to queue requests: each queued or running prediction occupies one slot. `cog build` sets the number of slots to `2 × max_batch_size`, so one batch can execute while the next one forms. Set `concurrency.max` in `cog.yaml` (or `COG_MAX_CONCURRENCY` at runtime) to change it; values below `max_batch_size` limit how large batches can get. When all slots are full, new predictions get `409 Conflict`, as with any concurrent model.
+
+A batched `run()` can be sync or async. Batches always execute one at a time, so `@cog.batch` can't be combined with `@cog.concurrent(max > 1)`.
+
+### Batch errors and cancellation
+
+- If `run()` raises an exception, every prediction in that batch fails with the error.
+- If `run()` returns a different number of outputs than it received inputs, every prediction in the batch fails.
+- An input that can't be converted into the item type fails only its own prediction; it never joins a batch.
+- Cancelling a prediction that is still queued removes it from the queue. Cancelling a prediction whose batch is already running resolves it as `canceled` immediately; the rest of the batch keeps running and the cancelled prediction's output is discarded. If every prediction in a running batch is cancelled, Cog cancels the `run()` call itself (see [Cancellation](#cancellation)).
+- When the server shuts down, predictions still waiting in the queue fail instead of running.
+
+### Batch logs
+
+Anything the batched `run()` prints is added to the logs of every prediction in the batch.
+
+### Batching limitations
+
+- The item type must be a `cog.BaseModel` subclass defined in the same file as `run()`. Fields inherited from another model class are not included in the schema.
+- `@cog.batch` is not supported for `train()`, for generator or streaming `run()` methods, or together with `@cog.streaming`.
+- Inside a batched `run()`, `current_scope()` returns a no-op scope, so metrics recorded there are discarded. Use the per-prediction `batch_*` metrics instead.
+- Only the model call is batched. Input preparation (such as downloading files) and output serialization still happen per prediction.
 
 ## `Input(**kwargs)`
 

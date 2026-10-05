@@ -209,7 +209,7 @@ This stanza describes the concurrency capabilities of the model. It is still sup
 
 ### `max`
 
-The maximum number of concurrent runs the model can process. If this is set, the model must specify an [async `run()` method](python.md#async-runners-and-concurrency).
+The maximum number of concurrent runs the model can process. If this is set, the model must specify an [async `run()` method](python.md#async-runners-and-concurrency), unless `run()` uses [`@cog.batch`](python.md#dynamic-batching). For a batched runner, `max` is the number of predictions that can be queued or running at once (by default `2 × max_batch_size`).
 
 If both `concurrency.max` and `@cog.concurrent(max=N)` are set, `concurrency.max` takes precedence and is the value baked into the image. Remove `concurrency.max` when migrating to `@cog.concurrent`.
 

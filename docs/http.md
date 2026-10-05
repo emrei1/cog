@@ -448,6 +448,8 @@ The response body is a JSON object with the following fields:
   Always includes `predict_time` (elapsed seconds).
   May also include custom metrics recorded by the model
   using [`self.record_metric()`](python.md#metrics).
+  Models that use [dynamic batching](python.md#dynamic-batching) also report
+  `batch_size`, `batch_queue_time`, and `batch_run_time`.
 
 ```http
 POST /predictions HTTP/1.1

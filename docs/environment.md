@@ -189,13 +189,15 @@ Controls how many predictions the model server can run concurrently. This overri
 
 By default, Cog runs one prediction at a time unless the model uses `@cog.concurrent(max=N)`. Invalid values are ignored and the default of `1` is used.
 
-Values greater than `1` require an async `run()` method. This applies even when `COG_MAX_CONCURRENCY` is set as a runtime operator override.
+Values greater than `1` require an async `run()` method, unless `run()` uses [`@cog.batch`](python.md#dynamic-batching). This applies even when `COG_MAX_CONCURRENCY` is set as a runtime operator override.
+
+For a batched runner, this is the number of predictions that can be queued or running at once, and it caps the batch size. `cog build` sets it to `2 × max_batch_size`.
 
 Concurrency is resolved in this order, from highest to lowest precedence:
 
 1. `COG_MAX_CONCURRENCY` set at runtime
 2. Deprecated `concurrency.max` in `cog.yaml`, which is baked into the image as `COG_MAX_CONCURRENCY`
-3. `@cog.concurrent(max=N)` on the async `run()` method
+3. `@cog.concurrent(max=N)` on the async `run()` method, or `2 × max_batch_size` for `@cog.batch`
 4. Default: `1`
 
 ```console

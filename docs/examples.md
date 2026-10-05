@@ -13,6 +13,8 @@ If you want a working project to copy from, start with one of these:
   shows how to read prediction context
 - [`hello-concurrency`](https://github.com/replicate/cog/tree/main/examples/hello-concurrency):
   demonstrates the `@cog.concurrent` decorator
+- [`hello-batching`](https://github.com/replicate/cog/tree/main/examples/hello-batching):
+  demonstrates dynamic request batching with `@cog.batch`, with a benchmark
 - [`hello-train`](https://github.com/replicate/cog/tree/main/examples/hello-train):
   defines a training interface
 - [`hello-replicate`](https://github.com/replicate/cog/tree/main/examples/hello-replicate):
