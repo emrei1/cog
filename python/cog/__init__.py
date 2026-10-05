@@ -26,6 +26,7 @@ from typing import TypeVar, overload
 
 from coglet import CancelationException as CancelationException
 
+from ._batch import batch
 from ._opaque import Opaque
 from ._version import __version__
 from .input import FieldInfo, Input
@@ -202,6 +203,7 @@ __all__ = [
     # Decorators
     "streaming",
     "concurrent",
+    "batch",
     # Deprecated compat shims
     "ExperimentalFeatureWarning",
     "emit_metric",
