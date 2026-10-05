@@ -1,15 +1,19 @@
 //! Bridge between coglet-worker's PredictHandler trait and PythonPredictor.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use coglet_core::bridge::protocol::SlotId;
+use coglet_core::CancellationToken;
+use coglet_core::batch::{BatchConfig, BatchError, BatchExecutor, BatchStats, Batcher};
+use coglet_core::bridge::protocol::{MetricMode, SlotId};
 use coglet_core::worker::{PredictHandler, PredictResult, SetupError, SlotSender};
 
+use crate::input::PreparedInput;
 use crate::predictor::PythonPredictor;
 
 struct PythonTraceGuard {
@@ -125,6 +129,196 @@ impl std::fmt::Display for SdkImplementation {
     }
 }
 
+/// One request's contribution to a batched run().
+pub struct BatchInput {
+    /// The `cog.BaseModel` item passed to run().
+    item: Py<PyAny>,
+    /// The member's slot sender (for log fan-out during the batch). Weak so a
+    /// cancelled member's slot can complete while its batch keeps running.
+    sender: std::sync::Weak<SlotSender>,
+    /// Keeps downloaded input files alive until the batch has run, even if
+    /// this member is cancelled while the batch is executing.
+    _prepared: PreparedInput,
+}
+
+/// Unique log routing IDs for batches.
+static NEXT_BATCH_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Unregisters a batch's log fan-out on drop.
+struct BatchLogGuard(String);
+
+impl Drop for BatchLogGuard {
+    fn drop(&mut self) {
+        crate::log_writer::unregister_prediction(&self.0);
+    }
+}
+
+/// Executes batches by calling the user's batched run() once per batch.
+struct PythonBatchExecutor {
+    predictor: Arc<PythonPredictor>,
+    async_loop: Option<Py<PyAny>>,
+}
+
+impl PythonBatchExecutor {
+    /// Run a sync batched run() on a blocking thread.
+    ///
+    /// The thread's Python ID is published so a batch-wide cancel can inject
+    /// `CancelationException`, and any undelivered injection is cleared before
+    /// the pooled thread is reused.
+    async fn execute_sync(
+        &self,
+        items: Vec<Py<PyAny>>,
+        routing_id: String,
+        cancel: CancellationToken,
+    ) -> Result<Vec<Py<PyAny>>, coglet_core::PredictionError> {
+        let thread_id: Arc<Mutex<Option<std::ffi::c_long>>> = Arc::new(Mutex::new(None));
+        let predictor = Arc::clone(&self.predictor);
+        let run_thread_id = Arc::clone(&thread_id);
+        let run = tokio::task::spawn_blocking(move || {
+            let expected = items.len();
+            *run_thread_id
+                .lock()
+                .expect("batch thread id mutex poisoned") =
+                Some(crate::cancel::current_py_thread_id());
+            crate::log_writer::set_sync_prediction_id(Some(&routing_id));
+            let result = Python::attach(|py| {
+                let output = predictor.call_batch_run(py, &items)?;
+                PythonPredictor::split_batch_outputs(py, &output, expected)
+            });
+            crate::log_writer::set_sync_prediction_id(None);
+            // Clear the published ID while holding the lock (without the GIL)
+            // so a concurrent cancel either injects before this point or not
+            // at all, then drop any injection that arrived too late to fire.
+            let mut guard = run_thread_id
+                .lock()
+                .expect("batch thread id mutex poisoned");
+            if let Some(id) = guard.take() {
+                crate::cancel::clear_pending_cancel(id);
+            }
+            drop(guard);
+            result
+        });
+        tokio::pin!(run);
+        let joined = tokio::select! {
+            joined = &mut run => joined,
+            _ = cancel.cancelled() => {
+                if let Some(id) = *thread_id.lock().expect("batch thread id mutex poisoned") {
+                    crate::cancel::cancel_sync_thread(id);
+                }
+                (&mut run).await
+            }
+        };
+        joined
+            .map_err(|e| coglet_core::PredictionError::Failed(format!("batch task failed: {e}")))?
+    }
+
+    /// Run an async batched run() on the shared asyncio loop.
+    async fn execute_async(
+        &self,
+        items: Vec<Py<PyAny>>,
+        routing_id: String,
+        cancel: CancellationToken,
+    ) -> Result<Vec<Py<PyAny>>, coglet_core::PredictionError> {
+        let Some(loop_obj) = self.async_loop.as_ref() else {
+            return Err(coglet_core::PredictionError::Failed(
+                "Async event loop not initialized".to_string(),
+            ));
+        };
+        let expected = items.len();
+        let future = Python::attach(|py| {
+            self.predictor
+                .submit_batch_async(py, &items, loop_obj, &routing_id)
+        })?;
+        let future_for_cancel = Python::attach(|py| future.clone_ref(py));
+        let wait = tokio::task::spawn_blocking(move || {
+            Python::attach(|py| match future.call_method0(py, "result") {
+                Ok(output) => PythonPredictor::split_batch_outputs(py, output.bind(py), expected),
+                Err(e) => {
+                    let message = e.to_string();
+                    if message.contains("CancelledError") || message.contains("cancelled") {
+                        Err(coglet_core::PredictionError::Cancelled)
+                    } else {
+                        Err(coglet_core::PredictionError::Failed(message))
+                    }
+                }
+            })
+        });
+        tokio::pin!(wait);
+        let joined = tokio::select! {
+            joined = &mut wait => joined,
+            _ = cancel.cancelled() => {
+                Python::attach(|py| {
+                    if let Err(e) = future_for_cancel.call_method0(py, "cancel") {
+                        tracing::warn!(error = %e, "Failed to cancel batch future");
+                    }
+                });
+                (&mut wait).await
+            }
+        };
+        joined
+            .map_err(|e| coglet_core::PredictionError::Failed(format!("batch task failed: {e}")))?
+    }
+}
+
+#[async_trait::async_trait]
+impl BatchExecutor<BatchInput, Py<PyAny>> for PythonBatchExecutor {
+    async fn execute(
+        &self,
+        inputs: Vec<BatchInput>,
+        cancel: CancellationToken,
+    ) -> Result<Vec<Py<PyAny>>, String> {
+        let routing_id = format!(
+            "_coglet_batch_{}",
+            NEXT_BATCH_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        crate::log_writer::register_batch(
+            routing_id.clone(),
+            inputs.iter().map(|input| input.sender.clone()).collect(),
+        );
+        let _log_guard = BatchLogGuard(routing_id.clone());
+
+        let items: Vec<Py<PyAny>> = Python::attach(|py| {
+            inputs
+                .iter()
+                .map(|input| input.item.clone_ref(py))
+                .collect()
+        });
+        let result = if self.predictor.is_async() {
+            self.execute_async(items, routing_id, cancel).await
+        } else {
+            self.execute_sync(items, routing_id, cancel).await
+        };
+        // Inputs (and their downloaded files) are released only after run().
+        drop(inputs);
+
+        result.map_err(|e| match e {
+            coglet_core::PredictionError::Failed(message)
+            | coglet_core::PredictionError::InvalidInput(message) => message,
+            other => other.to_string(),
+        })
+    }
+}
+
+/// Record the batch execution metrics on a member prediction.
+fn send_batch_metrics(slot_sender: &SlotSender, stats: &BatchStats) {
+    let metrics = [
+        ("batch_size", serde_json::json!(stats.batch_size)),
+        (
+            "batch_queue_time",
+            serde_json::json!(stats.queue_time.as_secs_f64()),
+        ),
+        (
+            "batch_run_time",
+            serde_json::json!(stats.run_time.as_secs_f64()),
+        ),
+    ];
+    for (name, value) in metrics {
+        if let Err(e) = slot_sender.send_metric(name.to_string(), value, MetricMode::Replace) {
+            tracing::warn!(error = %e, metric = name, "Failed to send batch metric");
+        }
+    }
+}
+
 /// Current state of a prediction slot
 #[derive(Debug, Default)]
 pub enum SlotState {
@@ -143,6 +337,11 @@ pub enum SlotState {
         future: Py<PyAny>,
         cancelled: bool,
     },
+    /// Prediction queued in, or executing as part of, a batch
+    BatchedPrediction {
+        /// Cancels this member only; the batch keeps running for the others.
+        cancel: CancellationToken,
+    },
 }
 
 impl SlotState {
@@ -150,6 +349,7 @@ impl SlotState {
         match self {
             SlotState::SyncPrediction { cancelled, .. } => *cancelled,
             SlotState::AsyncPrediction { cancelled, .. } => *cancelled,
+            SlotState::BatchedPrediction { cancel } => cancel.is_cancelled(),
             SlotState::Idle => false,
         }
     }
@@ -158,6 +358,7 @@ impl SlotState {
         match self {
             SlotState::SyncPrediction { cancelled, .. } => *cancelled = true,
             SlotState::AsyncPrediction { cancelled, .. } => *cancelled = true,
+            SlotState::BatchedPrediction { cancel } => cancel.cancel(),
             SlotState::Idle => { /* no-op */ }
         }
     }
@@ -179,6 +380,8 @@ pub struct PythonPredictHandler {
     /// Handle to the asyncio loop thread for joining on shutdown.
     async_thread: Mutex<Option<JoinHandle<()>>>,
     max_concurrency: usize,
+    /// Dynamic batching scheduler, present when run() uses `@cog.batch`.
+    batcher: Mutex<Option<Batcher<BatchInput, Py<PyAny>>>>,
 }
 
 impl PythonPredictHandler {
@@ -193,6 +396,7 @@ impl PythonPredictHandler {
             async_loop: Mutex::new(Some(loop_obj)),
             async_thread: Mutex::new(Some(thread)),
             max_concurrency,
+            batcher: Mutex::new(None),
         })
     }
 
@@ -207,6 +411,7 @@ impl PythonPredictHandler {
             async_loop: Mutex::new(Some(loop_obj)),
             async_thread: Mutex::new(Some(thread)),
             max_concurrency,
+            batcher: Mutex::new(None),
         })
     }
 
@@ -300,6 +505,86 @@ impl PythonPredictHandler {
         );
     }
 
+    /// Mark a slot as having a batched prediction in progress.
+    fn start_batched_prediction(&self, slot: SlotId, cancel: CancellationToken) {
+        let mut slots = self.slots.lock().expect("slots mutex poisoned");
+        slots.insert(slot, SlotState::BatchedPrediction { cancel });
+    }
+
+    fn batcher(&self) -> Option<Batcher<BatchInput, Py<PyAny>>> {
+        self.batcher
+            .lock()
+            .expect("batcher mutex poisoned")
+            .as_ref()
+            .cloned()
+    }
+
+    /// Run one prediction through the dynamic batcher.
+    ///
+    /// The prediction keeps its own slot: its input is prepared and its output
+    /// serialized here, on its own slot sender. Only the run() call is shared
+    /// with the other members of the batch.
+    async fn predict_batched(
+        &self,
+        slot: SlotId,
+        id: String,
+        input: serde_json::Value,
+        slot_sender: Arc<SlotSender>,
+        pred: Arc<PythonPredictor>,
+        batcher: Batcher<BatchInput, Py<PyAny>>,
+    ) -> PredictResult {
+        let start = std::time::Instant::now();
+        let cancel = CancellationToken::new();
+        self.start_batched_prediction(slot, cancel.clone());
+
+        // Route logs from input preparation / output serialization to this
+        // prediction. Logs written by run() itself fan out to every member.
+        let log_guard = Python::attach(|py| {
+            crate::log_writer::PredictionLogGuard::enter(py, id.clone(), Arc::clone(&slot_sender))
+        })
+        .map_err(|e| tracing::warn!(error = %e, "Failed to enter prediction context"))
+        .ok();
+
+        let result = match pred.prepare_batch_item(input) {
+            Ok((item, prepared)) => {
+                let batch_input = BatchInput {
+                    item,
+                    sender: Arc::downgrade(&slot_sender),
+                    _prepared: prepared,
+                };
+                tracing::trace!(%slot, %id, "Submitting prediction to batcher");
+                let outcome = batcher.submit(batch_input, cancel).await;
+                if let Some(stats) = &outcome.stats {
+                    send_batch_metrics(&slot_sender, stats);
+                }
+                match outcome.output {
+                    Ok(output) => pred.process_batch_output(&output, &slot_sender),
+                    Err(BatchError::Cancelled) => Err(coglet_core::PredictionError::Cancelled),
+                    Err(e @ BatchError::Shutdown) => {
+                        Err(coglet_core::PredictionError::Failed(e.to_string()))
+                    }
+                    Err(BatchError::Failed(message)) => {
+                        Err(coglet_core::PredictionError::Failed(message))
+                    }
+                }
+            }
+            Err(e) => Err(e),
+        };
+
+        self.finish_prediction(slot);
+        drop(log_guard);
+
+        let elapsed = start.elapsed().as_secs_f64();
+        match result {
+            Ok(r) => {
+                let is_stream = r.output.is_stream();
+                PredictResult::success(output_to_json(r.output), elapsed, is_stream)
+            }
+            Err(coglet_core::PredictionError::Cancelled) => PredictResult::cancelled(elapsed),
+            Err(e) => PredictResult::failed(e.to_string(), elapsed),
+        }
+    }
+
     /// Clear prediction state for a slot.
     fn finish_prediction(&self, slot: SlotId) {
         let mut slots = self.slots.lock().expect("slots mutex poisoned");
@@ -368,7 +653,10 @@ impl PredictHandler for PythonPredictHandler {
 
             let pred = PythonPredictor::load(py, &self.predictor_ref)
                 .map_err(|e| SetupError::load(e.to_string()))?;
-            if self.max_concurrency > 1 && !pred.is_async() {
+            // Batched predictors may be sync: concurrent slots only queue
+            // requests, and batches execute one at a time.
+            let batched = self.mode == HandlerMode::Predict && pred.batch_spec().is_some();
+            if self.max_concurrency > 1 && !pred.is_async() && !batched {
                 return Err(SetupError::setup(
                     "COG_MAX_CONCURRENCY > 1 requires an async run() or predict() method",
                 ));
@@ -394,8 +682,29 @@ impl PredictHandler for PythonPredictHandler {
             pred.setup(py, async_loop.as_ref())
                 .map_err(|e| SetupError::setup(e.to_string()))?;
 
+            let pred = Arc::new(pred);
+            if batched && let Some(spec) = pred.batch_spec() {
+                if self.max_concurrency < spec.max_batch_size {
+                    tracing::warn!(
+                        max_batch_size = spec.max_batch_size,
+                        max_concurrency = self.max_concurrency,
+                        "COG_MAX_CONCURRENCY is lower than max_batch_size; \
+                         batches cannot exceed the number of concurrent predictions"
+                    );
+                }
+                let executor = PythonBatchExecutor {
+                    predictor: Arc::clone(&pred),
+                    async_loop: async_loop.as_ref().map(|l| l.clone_ref(py)),
+                };
+                let batcher = Batcher::spawn(
+                    BatchConfig::new(spec.max_batch_size, spec.max_wait),
+                    Arc::new(executor),
+                );
+                *self.batcher.lock().expect("batcher mutex poisoned") = Some(batcher);
+            }
+
             let mut guard = self.predictor.lock().expect("predictor mutex poisoned");
-            *guard = Some(Arc::new(pred));
+            *guard = Some(pred);
 
             tracing::info!("Setup complete");
             Ok(())
@@ -426,6 +735,13 @@ impl PredictHandler for PythonPredictHandler {
                 }
             }
         };
+        if self.mode == HandlerMode::Predict
+            && let Some(batcher) = self.batcher()
+        {
+            return self
+                .predict_batched(slot, id, input, slot_sender, pred, batcher)
+                .await;
+        }
         let is_async = pred.is_async();
         tracing::trace!(%slot, %id, is_async, "Got predictor");
         #[cfg(feature = "tracing")]
@@ -740,6 +1056,11 @@ impl PredictHandler for PythonPredictHandler {
                     // via PyThreadState_SetAsyncExc (fires at next bytecode boundary)
                     crate::cancel::cancel_sync_thread(py_thread_id);
                 }
+                SlotState::BatchedPrediction { .. } => {
+                    // mark_cancelled() fired the member's token: it leaves the
+                    // queue, or resolves immediately if its batch is running.
+                    tracing::trace!(%slot, "Cancelled batched prediction");
+                }
                 SlotState::Idle => {
                     // Already idle, nothing to cancel
                     tracing::trace!(%slot, "Cancel called on idle slot");
@@ -793,6 +1114,10 @@ impl PredictHandler for PythonPredictHandler {
     }
 
     async fn shutdown(&self) {
+        if let Some(batcher) = self.batcher.lock().expect("batcher mutex poisoned").take() {
+            tracing::info!("Shutting down batcher");
+            batcher.shutdown();
+        }
         if !python_tracing_enabled() {
             return;
         }

@@ -1,5 +1,6 @@
 """Tests for coglet Python bindings."""
 
+import os
 import queue
 import re
 import socket
@@ -366,9 +367,17 @@ predict: "predict.py:Predictor"
 class CogletServer:
     """Context manager for running coglet server."""
 
-    def __init__(self, predictor_path: Path, port: int = 0):
+    def __init__(
+        self,
+        predictor_path: Path,
+        port: int = 0,
+        env: dict[str, str] | None = None,
+        wait_ready: bool = True,
+    ):
         self.predictor_path = predictor_path
         self.requested_port = port
+        self.env = env
+        self.wait_ready = wait_ready
         self.port = None
         self.process = None
         self.stderr_lines = []
@@ -387,6 +396,7 @@ class CogletServer:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,  # Line buffered
+            env=None if self.env is None else {**os.environ, **self.env},
             cwd=str(
                 self.predictor_path.parent
             ),  # Run from predictor directory to find cog.yaml
@@ -399,7 +409,8 @@ class CogletServer:
         # Discover actual port from logs
         self._discover_port()
         # Wait for server to become ready
-        self._wait_for_ready()
+        if self.wait_ready:
+            self._wait_for_ready()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

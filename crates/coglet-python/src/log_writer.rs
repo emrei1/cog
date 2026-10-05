@@ -16,7 +16,7 @@
 //! inject onto the cog namespace later.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::*;
@@ -33,10 +33,18 @@ use tokio::sync::mpsc::Sender;
 /// Named `cog_prediction_id` - documented as internal, don't modify.
 static PREDICTION_CONTEXTVAR: OnceLock<Py<PyAny>> = OnceLock::new();
 
-/// Registry mapping prediction_id -> SlotSender.
+/// Registry mapping prediction_id -> SlotSender(s).
 /// When a prediction starts, we register the sender.
 /// When SlotLogWriter.write() is called, we look up the sender here.
-static PREDICTION_REGISTRY: OnceLock<Mutex<HashMap<String, Arc<SlotSender>>>> = OnceLock::new();
+///
+/// A batched run() registers one routing ID for the whole batch that maps to
+/// every member's sender, so logs written during the batch reach each member.
+///
+/// Senders are held weakly: the registry must not keep a slot's log channel
+/// open after its prediction returns (e.g. a member cancelled while its batch
+/// is still running), or the slot's completion would wait for the batch.
+static PREDICTION_REGISTRY: OnceLock<Mutex<HashMap<String, Vec<Weak<SlotSender>>>>> =
+    OnceLock::new();
 
 /// Current sync prediction ID.
 /// For sync predictions (single slot, blocking), there's exactly one active prediction.
@@ -53,7 +61,7 @@ fn get_sync_prediction_id_slot() -> &'static Mutex<Option<String>> {
 static CONTROL_CHANNEL_LOG_SENDER: OnceLock<Mutex<Option<Arc<ControlChannelLogSender>>>> =
     OnceLock::new();
 
-fn get_registry() -> &'static Mutex<HashMap<String, Arc<SlotSender>>> {
+fn get_registry() -> &'static Mutex<HashMap<String, Vec<Weak<SlotSender>>>> {
     PREDICTION_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -168,7 +176,17 @@ pub fn register_prediction(prediction_id: String, sender: Arc<SlotSender>) {
         .lock()
         .expect("prediction_registry mutex poisoned");
     tracing::trace!(%prediction_id, "Registering prediction sender");
-    registry.insert(prediction_id, sender);
+    registry.insert(prediction_id, vec![Arc::downgrade(&sender)]);
+}
+
+/// Register a routing ID for a batched run() that fans logs out to every
+/// member prediction's sender.
+pub fn register_batch(batch_id: String, senders: Vec<Weak<SlotSender>>) {
+    let mut registry = get_registry()
+        .lock()
+        .expect("prediction_registry mutex poisoned");
+    tracing::trace!(%batch_id, members = senders.len(), "Registering batch log senders");
+    registry.insert(batch_id, senders);
 }
 
 /// Unregister a prediction ID.
@@ -188,12 +206,14 @@ pub fn unregister_prediction(prediction_id: &str) {
     }
 }
 
-/// Get the SlotSender for a prediction ID.
-fn get_prediction_sender(prediction_id: &str) -> Option<Arc<SlotSender>> {
+/// Get the SlotSender(s) for a prediction (or batch) routing ID.
+fn get_prediction_senders(prediction_id: &str) -> Option<Vec<Arc<SlotSender>>> {
     let registry = get_registry()
         .lock()
         .expect("prediction_registry mutex poisoned");
-    registry.get(prediction_id).cloned()
+    registry
+        .get(prediction_id)
+        .map(|senders| senders.iter().filter_map(Weak::upgrade).collect())
 }
 
 /// Set the current prediction ID in the ContextVar (for async).
@@ -332,7 +352,7 @@ impl SlotLogWriter {
         match get_current_prediction_id(py)? {
             Some(prediction_id) => {
                 // Have prediction ID - check if still active
-                if let Some(sender) = get_prediction_sender(&prediction_id) {
+                if let Some(senders) = get_prediction_senders(&prediction_id) {
                     // Active prediction - route to slot
                     tracing::trace!(
                         prediction_id = %prediction_id,
@@ -340,9 +360,17 @@ impl SlotLogWriter {
                         bytes = data.len(),
                         "Log routed to slot"
                     );
-                    sender
-                        .send_log(self.source, data)
-                        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+                    if let [sender] = senders.as_slice() {
+                        sender
+                            .send_log(self.source, data)
+                            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+                    } else {
+                        // Batch fan-out: a member that already finished (e.g.
+                        // cancelled) has a closed channel; skip it.
+                        for sender in &senders {
+                            let _ = sender.send_log(self.source, data);
+                        }
+                    }
                 } else {
                     // Orphan task - prediction completed but task still running
                     tracing::trace!(
@@ -599,11 +627,34 @@ mod tests {
 
         // Register
         register_prediction(prediction_id.clone(), sender.clone());
-        assert!(get_prediction_sender(&prediction_id).is_some());
+        assert!(get_prediction_senders(&prediction_id).is_some());
 
         // Unregister
         unregister_prediction(&prediction_id);
-        assert!(get_prediction_sender(&prediction_id).is_none());
+        assert!(get_prediction_senders(&prediction_id).is_none());
+    }
+
+    #[test]
+    fn batch_registry_maps_to_every_member() {
+        let batch_id = "batch_registry_test".to_string();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let a = Arc::new(SlotSender::new(tx_a, std::env::temp_dir()));
+        let b = Arc::new(SlotSender::new(tx_b, std::env::temp_dir()));
+
+        register_batch(
+            batch_id.clone(),
+            vec![Arc::downgrade(&a), Arc::downgrade(&b)],
+        );
+        assert_eq!(get_prediction_senders(&batch_id).map(|s| s.len()), Some(2));
+
+        // A member whose prediction finished no longer receives batch logs.
+        drop(b);
+        assert_eq!(get_prediction_senders(&batch_id).map(|s| s.len()), Some(1));
+        drop(a);
+
+        unregister_prediction(&batch_id);
+        assert!(get_prediction_senders(&batch_id).is_none());
     }
 
     #[test]

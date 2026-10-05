@@ -74,6 +74,21 @@ pub fn cancel_sync_thread(py_thread_id: std::ffi::c_long) {
     });
 }
 
+/// Clear a pending `CancelationException` that was injected into a thread
+/// but not yet raised (e.g. the call returned first).
+///
+/// Used before a thread is reused for unrelated work, so a late cancel cannot
+/// surface in the next call.
+pub fn clear_pending_cancel(py_thread_id: std::ffi::c_long) {
+    Python::attach(|_py| {
+        // SAFETY: We hold the GIL. A NULL exception clears any pending async
+        // exception for the thread.
+        unsafe {
+            pyo3::ffi::PyThreadState_SetAsyncExc(py_thread_id, std::ptr::null_mut());
+        }
+    });
+}
+
 /// Get the current Python thread identifier (for later use with `cancel_sync_thread`).
 ///
 /// Uses `threading.get_ident()` which returns the same value as

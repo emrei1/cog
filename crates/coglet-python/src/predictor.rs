@@ -364,6 +364,16 @@ pub struct PythonPredictor {
     kind: PredictorKind,
     /// Whether the setup() method is an async def
     setup_is_async: bool,
+    /// Present when run() is decorated with `@cog.batch`.
+    batch: Option<BatchSpec>,
+}
+
+/// Validated `@cog.batch` configuration of a predictor's run() method.
+pub struct BatchSpec {
+    /// The `cog.BaseModel` subclass each request is converted into.
+    item_type: PyObject,
+    pub max_batch_size: usize,
+    pub max_wait: std::time::Duration,
 }
 
 // PyObject is Send in PyO3 0.23+
@@ -449,10 +459,18 @@ impl PythonPredictor {
             false
         };
 
+        let batch = match &kind {
+            PredictorKind::Class { method_name, .. } => {
+                Self::detect_batch(py, &instance, method_name.as_str())?
+            }
+            PredictorKind::StandaloneFunction(_) => None,
+        };
+
         let predictor = Self {
             instance,
             kind,
             setup_is_async,
+            batch,
         };
 
         // Patch FieldInfo defaults on predict/train methods so Python uses actual
@@ -592,6 +610,50 @@ impl PythonPredictor {
         }
 
         Ok(())
+    }
+
+    /// Detect and validate a `@cog.batch` decorated run() method.
+    ///
+    /// Validation errors (wrong signature, unsupported combinations) propagate
+    /// so the worker fails at startup instead of on the first request. SDKs
+    /// that predate batching have no `cog._batch` module and are never batched.
+    fn detect_batch(
+        py: Python<'_>,
+        instance: &PyObject,
+        method_name: &str,
+    ) -> PyResult<Option<BatchSpec>> {
+        let batch_module = match py.import("cog._batch") {
+            Ok(m) => m,
+            Err(e) if e.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        let func = instance.bind(py).getattr(method_name)?;
+        let signature = batch_module.getattr("inspect_batch_run")?.call1((func,))?;
+        if signature.is_none() {
+            return Ok(None);
+        }
+        let config = signature.getattr("config")?;
+        let max_batch_size: usize = config.getattr("max_batch_size")?.extract()?;
+        let max_wait_ms: f64 = config.getattr("max_wait_ms")?.extract()?;
+        let item_type = signature.getattr("item_type")?.unbind();
+        tracing::info!(
+            max_batch_size,
+            max_wait_ms,
+            "Detected batched {}()",
+            method_name
+        );
+        Ok(Some(BatchSpec {
+            item_type,
+            max_batch_size,
+            max_wait: std::time::Duration::from_secs_f64(max_wait_ms / 1000.0),
+        }))
+    }
+
+    /// Returns the `@cog.batch` configuration when run() is batched.
+    pub fn batch_spec(&self) -> Option<&BatchSpec> {
+        self.batch.as_ref()
     }
 
     /// Detect if a method is an async function.
@@ -1222,6 +1284,132 @@ impl PythonPredictor {
             predict_time: None,
             logs: String::new(),
             metrics: Default::default(),
+        })
+    }
+
+    /// Convert one request's input into a batch item object.
+    ///
+    /// Applies the same URL -> Path/File coercion and downloads as the
+    /// non-batched path, using the item type's field annotations. The returned
+    /// `PreparedInput` owns downloaded temp files and must outlive the batch.
+    pub fn prepare_batch_item(
+        &self,
+        input: serde_json::Value,
+    ) -> Result<(PyObject, PreparedInput), PredictionError> {
+        let spec = self
+            .batch
+            .as_ref()
+            .ok_or_else(|| PredictionError::Failed("Predictor is not batched".to_string()))?;
+        Python::attach(|py| {
+            let json_module = py.import("json").map_err(|e| {
+                PredictionError::Failed(format!("Failed to import json module: {}", e))
+            })?;
+            let input_str = serde_json::to_string(&input)
+                .map_err(|e| PredictionError::InvalidInput(e.to_string()))?;
+            let py_input = json_module
+                .call_method1("loads", (input_str,))
+                .map_err(|e| PredictionError::InvalidInput(format!("Invalid JSON input: {}", e)))?;
+            #[allow(deprecated)]
+            let raw_input_dict = py_input.downcast::<PyDict>().map_err(|_| {
+                PredictionError::InvalidInput("Input must be a JSON object".to_string())
+            })?;
+
+            let item_type = spec.item_type.bind(py);
+            let prepare_span = coglet_core::cog_span!(info_span, "cog.prediction.prepare_input");
+            let prepared = {
+                let _prepare_entered = prepare_span.enter();
+                input::prepare_input(py, raw_input_dict, item_type)
+            }
+            .map_err(|e| PredictionError::InvalidInput(format_validation_error(py, &e)))?;
+
+            let item = py
+                .import("cog._batch")
+                .and_then(|m| m.getattr("build_batch_item"))
+                .and_then(|build| build.call1((item_type, prepared.dict(py))))
+                .map_err(|e| PredictionError::InvalidInput(format_validation_error(py, &e)))?;
+            Ok((item.unbind(), prepared))
+        })
+    }
+
+    /// Call the batched run() with a list of items.
+    ///
+    /// For a sync run() this executes the batch and returns its raw output.
+    /// For an async run() it returns the coroutine to schedule.
+    pub fn call_batch_run<'py>(
+        &self,
+        py: Python<'py>,
+        items: &[PyObject],
+    ) -> Result<Bound<'py, PyAny>, PredictionError> {
+        let method_name = match &self.kind {
+            PredictorKind::Class { method_name, .. } => method_name.as_str(),
+            PredictorKind::StandaloneFunction(_) => {
+                return Err(PredictionError::Failed(
+                    "Batching requires a runner class".to_string(),
+                ));
+            }
+        };
+        let list = pyo3::types::PyList::new(py, items.iter().map(|item| item.bind(py)))
+            .map_err(|e| PredictionError::Failed(format!("Failed to build batch list: {}", e)))?;
+        self.instance
+            .bind(py)
+            .call_method1(method_name, (list,))
+            .map_err(|e| {
+                if is_cancelation_exception(py, &e) {
+                    PredictionError::Cancelled
+                } else {
+                    PredictionError::Failed(e.to_string())
+                }
+            })
+    }
+
+    /// Submit an async batched run() coroutine to the shared event loop.
+    ///
+    /// `routing_id` is the log routing ID registered for the batch.
+    pub fn submit_batch_async(
+        &self,
+        py: Python<'_>,
+        items: &[PyObject],
+        event_loop: &Py<PyAny>,
+        routing_id: &str,
+    ) -> Result<Py<PyAny>, PredictionError> {
+        let coro = self.call_batch_run(py, items)?;
+        submit_async_coroutine(py, &coro, event_loop, routing_id, None, None)
+    }
+
+    /// Validate a batched run() return value: one output per input.
+    pub fn split_batch_outputs(
+        py: Python<'_>,
+        result: &Bound<'_, PyAny>,
+        expected: usize,
+    ) -> Result<Vec<PyObject>, PredictionError> {
+        let outputs = py
+            .import("cog._batch")
+            .and_then(|m| m.getattr("check_batch_outputs"))
+            .and_then(|check| check.call1((result, expected)))
+            .map_err(|e| PredictionError::Failed(format_validation_error(py, &e)))?;
+        outputs
+            .extract::<Vec<PyObject>>()
+            .map_err(|e| PredictionError::Failed(format!("Invalid batch outputs: {}", e)))
+    }
+
+    /// Serialize one item's output from a batched run() onto its own slot.
+    pub fn process_batch_output(
+        &self,
+        output: &PyObject,
+        slot_sender: &SlotSender,
+    ) -> Result<PredictionResult, PredictionError> {
+        Python::attach(|py| {
+            let json_module = py.import("json").map_err(|e| {
+                PredictionError::Failed(format!("Failed to import json module: {}", e))
+            })?;
+            let output =
+                self.process_single_output(py, output.bind(py), &json_module, slot_sender)?;
+            Ok(PredictionResult {
+                output,
+                predict_time: None,
+                logs: String::new(),
+                metrics: Default::default(),
+            })
         })
     }
 
