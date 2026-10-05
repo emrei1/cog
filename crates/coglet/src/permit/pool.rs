@@ -347,8 +347,21 @@ impl PermitPool {
         false
     }
 
+    /// Upper bound on lock retries in `try_acquire`.
+    const TRY_LOCK_ATTEMPTS: usize = 1000;
+
     pub fn try_acquire(&self) -> Option<PermitInUse> {
-        let mut rx = self.available_rx.try_lock().ok()?;
+        // Concurrent `try_acquire` callers only hold this lock for a
+        // non-blocking `try_recv`, so contention is momentary. Retry briefly
+        // instead of reporting "no capacity" while a slot is actually free —
+        // simultaneous HTTP submissions would otherwise get spurious 409s.
+        let mut rx = (0..Self::TRY_LOCK_ATTEMPTS).find_map(|_| {
+            let guard = self.available_rx.try_lock().ok();
+            if guard.is_none() {
+                std::thread::yield_now();
+            }
+            guard
+        })?;
         loop {
             let inner = rx.try_recv().ok()?;
             self.available_count.fetch_sub(1, Ordering::Release);
@@ -429,6 +442,38 @@ mod tests {
 
         let p3 = pool.try_acquire();
         assert!(p3.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_try_acquire_succeeds_while_slots_are_free() {
+        const SLOTS: usize = 32;
+        for _ in 0..20 {
+            let pool = Arc::new(PermitPool::new(SLOTS));
+            let mut readers = Vec::new();
+            for _ in 0..SLOTS {
+                let (write, read) = make_socket_pair().await;
+                readers.push(read);
+                pool.add_permit(SlotId::new(), FramedWrite::new(write, JsonCodec::new()));
+            }
+
+            let barrier = Arc::new(std::sync::Barrier::new(SLOTS));
+            let handles: Vec<_> = (0..SLOTS)
+                .map(|_| {
+                    let pool = Arc::clone(&pool);
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        pool.try_acquire().map(PermitInUse::into_poisoned)
+                    })
+                })
+                .collect();
+            let acquired = handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .filter(Option::is_some)
+                .count();
+            assert_eq!(acquired, SLOTS, "every caller should get a free slot");
+        }
     }
 
     #[tokio::test]
