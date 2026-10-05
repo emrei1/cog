@@ -6,6 +6,8 @@ Cog's example models now live in this repository under `examples/`.
 
 - [`blur`](blur): image-to-image box blur example
 - [`canary`](canary): simple streaming string output example
+- [`hello-batching`](hello-batching): dynamic request batching with
+  `@cog.batch`, plus a throughput/latency benchmark
 - [`hello-concurrency`](hello-concurrency): demonstrates the `concurrency`
   setting in `cog.yaml`
 - [`hello-context`](hello-context): shows how to read prediction context
